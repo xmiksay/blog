@@ -36,5 +36,4 @@ tracing       = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 image         = "0.25"
 base64        = "0.22"
-similar       = "2"
 diffy         = "0.4"

@@ -2,7 +2,7 @@
 {% block title %}{{ page.path }} – Blog{% endblock %}
 {% block content %}
 <article class="article-detail">
-    <h1>{{ page.path }}</h1>
+    <h1>{{ page.path }}{% if logged_in %} <a href="/admin/stranky/{{ page.id }}/edit" class="edit-link">Edit</a>{% endif %}</h1>
     <p class="meta">{{ page.modified_at|timeformat("%d. %m. %Y") }}</p>
     {% if tags is defined and tags | length > 0 %}
     <div class="tag-list">

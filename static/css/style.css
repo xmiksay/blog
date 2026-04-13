@@ -342,6 +342,11 @@ footer {
 .controls button:hover { background: var(--black); border-color: var(--black); color: var(--white); }
 .move-info { min-width: 9rem; text-align: center; font-family: monospace; color: var(--text); font-size: 0.9rem; }
 
+/* ===== EDIT LINK ===== */
+.edit-link { font-size: 0.75rem; font-weight: 500; color: var(--muted); vertical-align: middle; margin-left: 0.5rem; }
+.edit-link:hover { color: var(--accent); }
+.edit-bar { text-align: right; margin-bottom: 0.5rem; }
+
 /* ===== RESPONSIVE ===== */
 @media (max-width: 768px) {
     header { display: flex; }

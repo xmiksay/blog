@@ -85,6 +85,8 @@ struct EditPageArgs {
     path: String,
     markdown: Option<String>,
     summary: Option<String>,
+    #[serde(default)]
+    tag_names: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -210,9 +212,22 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                             "summary": {
                                 "type": "string",
                                 "description": "New summary (optional)"
+                            },
+                            "tag_names": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Tag names to assign (optional, replaces existing tags)"
                             }
                         },
                         "required": ["path"]
+                    }
+                },
+                {
+                    "name": "list_tags",
+                    "description": "List all available tags. Returns tag name and description.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
                     }
                 },
                 {
@@ -254,6 +269,7 @@ async fn handle_tools_call(
     match tool_name {
         "read_page" => tool_read_page(state, id, arguments).await,
         "edit_page" => tool_edit_page(state, user_id, id, arguments).await,
+        "list_tags" => tool_list_tags(state, id).await,
         "search_pages" => tool_search_pages(state, id, arguments).await,
         _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
     }
@@ -335,11 +351,22 @@ async fn tool_edit_page(
         Err(e) => return tool_error(id, &format!("Invalid arguments: {e}")),
     };
 
-    if args.markdown.is_none() && args.summary.is_none() {
-        return tool_error(id, "Nothing to update — provide markdown or summary");
+    if args.markdown.is_none() && args.summary.is_none() && args.tag_names.is_none() {
+        return tool_error(id, "Nothing to update — provide markdown, summary, or tag_names");
     }
 
     let now = chrono::Utc::now().fixed_offset();
+
+    // Resolve tag names to IDs if provided
+    let tag_ids = match &args.tag_names {
+        Some(names) if !names.is_empty() => {
+            match resolve_tag_ids(state, names).await {
+                Ok(ids) => Some(ids),
+                Err(e) => return tool_error(id, &e),
+            }
+        }
+        _ => None,
+    };
 
     let existing = page::Entity::find()
         .filter(page::Column::Path.eq(&args.path))
@@ -363,6 +390,9 @@ async fn tool_edit_page(
             if let Some(ref summary) = args.summary {
                 active.summary = Set(Some(summary.clone()).filter(|s| !s.is_empty()));
             }
+            if let Some(ref ids) = tag_ids {
+                active.tag_ids = Set(ids.clone());
+            }
             active.modified_at = Set(now);
             active.modified_by = Set(user_id);
 
@@ -376,8 +406,8 @@ async fn tool_edit_page(
                 path: Set(args.path.clone()),
                 summary: Set(args.summary.clone().filter(|s| !s.is_empty())),
                 markdown: Set(args.markdown.clone().unwrap_or_default()),
-                tag_ids: Set(vec![]),
-                private: Set(false),
+                tag_ids: Set(tag_ids.clone().unwrap_or_default()),
+                private: Set(true),
                 created_at: Set(now),
                 created_by: Set(user_id),
                 modified_at: Set(now),
@@ -465,6 +495,48 @@ async fn tool_search_pages(
         .join("\n");
 
     tool_result(id, out)
+}
+
+async fn tool_list_tags(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    let tags = tag::Entity::find()
+        .order_by_asc(tag::Column::Name)
+        .all(&state.db)
+        .await;
+
+    match tags {
+        Ok(tags) if tags.is_empty() => tool_result(id, "No tags defined.".into()),
+        Ok(tags) => {
+            let out = tags
+                .iter()
+                .map(|t| match &t.description {
+                    Some(d) if !d.is_empty() => format!("{}: {d}", t.name),
+                    _ => t.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            tool_result(id, out)
+        }
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn resolve_tag_ids(state: &AppState, names: &[String]) -> Result<Vec<i32>, String> {
+    let tags = tag::Entity::find()
+        .filter(tag::Column::Name.is_in(names.iter().map(|s| s.as_str())))
+        .all(&state.db)
+        .await
+        .map_err(|e| format!("Database error: {e}"))?;
+
+    let found: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+    let missing: Vec<&String> = names.iter().filter(|n| !found.contains(n)).collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Unknown tags: {}",
+            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    Ok(tags.iter().map(|t| t.id).collect())
 }
 
 async fn resolve_tag_names(state: &AppState, tag_ids: &[i32]) -> Vec<String> {

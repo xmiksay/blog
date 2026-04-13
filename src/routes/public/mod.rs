@@ -30,8 +30,9 @@ pub async fn catch_all(
         .await
     {
         let body_html = markdown::render(&menu_item.markdown, &state.db, logged_in).await;
+        let menu_id = menu_item.id;
         let tmpl = state.tmpl.get_template("menu_page.html").unwrap();
-        return match tmpl.render(context! { body_html, menu => nav, logged_in }) {
+        return match tmpl.render(context! { body_html, menu => nav, logged_in, menu_id }) {
             Ok(html) => Html(html),
             Err(e) => Html(format!("<h1>Render error</h1><pre>{e}</pre>")),
         };

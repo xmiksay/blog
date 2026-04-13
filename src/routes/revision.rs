@@ -17,12 +17,7 @@ pub async fn create_revision_if_changed(
         return;
     }
 
-    let diff = similar::TextDiff::from_lines(new_markdown, old_markdown);
-    let patch = diff
-        .unified_diff()
-        .context_radius(3)
-        .header("a/page", "b/page")
-        .to_string();
+    let patch = diffy::create_patch(new_markdown, old_markdown).to_string();
 
     let now = chrono::Utc::now().fixed_offset();
     let revision = page_revision::ActiveModel {

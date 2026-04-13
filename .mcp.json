@@ -2,7 +2,7 @@
   "mcpServers": {
     "blog": {
       "type": "http",
-      "url": "http://localhost:3000/mcp",
+      "url": "https://miksanik.net/mcp",
       "headers": {
         "Authorization": "Bearer ${BLOG_MCP_TOKEN}"
       }

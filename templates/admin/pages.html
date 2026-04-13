@@ -7,9 +7,9 @@
     <table>
         <thead>
             <tr>
-                <th>Path</th>
+                <th><a href="?sort={% if sort == 'path' %}path_desc{% else %}path{% endif %}">Path{% if sort == 'path' %} ▲{% elif sort == 'path_desc' %} ▼{% endif %}</a></th>
                 <th>Private</th>
-                <th>Modified</th>
+                <th><a href="?sort={% if sort == 'modified' %}modified_asc{% else %}modified{% endif %}">Modified{% if sort == 'modified' %} ▼{% elif sort == 'modified_asc' %} ▲{% endif %}</a></th>
                 <th>Actions</th>
             </tr>
         </thead>

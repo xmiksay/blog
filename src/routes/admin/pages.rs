@@ -47,9 +47,25 @@ impl PageForm {
     }
 }
 
-pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
-    let pages: Vec<PageView> = page::Entity::find()
-        .order_by_desc(page::Column::ModifiedAt)
+#[derive(serde::Deserialize)]
+pub struct ListQuery {
+    pub sort: Option<String>,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+) -> impl IntoResponse {
+    let sort = query.sort.as_deref().unwrap_or("modified");
+    let mut select = page::Entity::find();
+    select = match sort {
+        "path" => select.order_by_asc(page::Column::Path),
+        "path_desc" => select.order_by_desc(page::Column::Path),
+        "modified" => select.order_by_desc(page::Column::ModifiedAt),
+        "modified_asc" => select.order_by_asc(page::Column::ModifiedAt),
+        _ => select.order_by_desc(page::Column::ModifiedAt),
+    };
+    let pages: Vec<PageView> = select
         .all(&state.db)
         .await
         .unwrap_or_default()
@@ -59,7 +75,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
     let menu = build_menu(&state.db).await;
     let tmpl = state.tmpl.get_template("admin/pages.html").unwrap();
     Html(
-        tmpl.render(context! { pages, menu, logged_in => true })
+        tmpl.render(context! { pages, menu, logged_in => true, sort })
             .unwrap(),
     )
 }
