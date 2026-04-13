@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Admin – Images{% endblock %}
+{% block content %}
+<div class="admin-dashboard">
+    <h1>Images <a href="/admin/obrazky/nahrat" class="btn-small">+ Upload</a></h1>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Thumbnail</th>
+                <th>Title</th>
+                <th>Tag</th>
+                <th>Date</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for img in images %}
+            <tr>
+                <td><img src="/obrazky/{{ img.id }}/nahled" alt="{{ img.title }}" style="max-height:60px"></td>
+                <td>{{ img.title }}</td>
+                <td><code>[img {{ img.id }}]</code></td>
+                <td>{{ img.created_at }}</td>
+                <td>
+                    <a href="/admin/obrazky/{{ img.id }}/edit" class="btn btn-small">Edit</a>
+                    <form method="POST" action="/admin/obrazky/{{ img.id }}/smazat" style="display:inline">
+                        <button type="submit" class="btn btn-small" onclick="return confirm('Delete image?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

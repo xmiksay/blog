@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}{{ tag.name }} – Blog{% endblock %}
+{% block content %}
+<div class="tag-page">
+    <h1>{{ tag.name }}</h1>
+    {% if tag.description %}
+    <p class="meta">{{ tag.description }}</p>
+    {% endif %}
+
+    {% if pages | length == 0 %}
+    <p>No pages found.</p>
+    {% else %}
+    <ul class="page-list">
+        {% for p in pages %}
+        <li>
+            <a href="/{{ p.path }}">{{ p.path }}</a>
+            {% if p.summary %}<span class="summary">{{ p.summary }}</span>{% endif %}
+            <span class="meta">{{ p.modified_at|timeformat("%d. %m. %Y") }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if total_pages > 1 %}
+    <nav class="pagination">
+        {% if current_page > 1 %}
+        <a href="/tag/{{ tag.id }}?page={{ current_page - 1 }}">&laquo; Prev</a>
+        {% endif %}
+        {% for p in range(1, total_pages + 1) %}
+            {% if p == current_page %}
+            <span class="current">{{ p }}</span>
+            {% else %}
+            <a href="/tag/{{ tag.id }}?page={{ p }}">{{ p }}</a>
+            {% endif %}
+        {% endfor %}
+        {% if current_page < total_pages %}
+        <a href="/tag/{{ tag.id }}?page={{ current_page + 1 }}">Next &raquo;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+</div>
+{% endblock %}

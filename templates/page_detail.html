@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ page.path }} – Blog{% endblock %}
+{% block content %}
+<article class="article-detail">
+    <h1>{{ page.path }}</h1>
+    <p class="meta">{{ page.modified_at|timeformat("%d. %m. %Y") }}</p>
+    {% if tags is defined and tags | length > 0 %}
+    <div class="tag-list">
+        {% for t in tags %}
+        <a href="/tag/{{ t.id }}" class="tag">{{ t.name }}</a>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <div class="article-body">
+        {{ body_html | safe }}
+    </div>
+</article>
+{% endblock %}

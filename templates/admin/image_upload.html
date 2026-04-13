@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Upload images{% endblock %}
+{% block content %}
+<div class="admin-form">
+    <h1>Upload images</h1>
+
+    <form method="POST" action="/admin/obrazky" enctype="multipart/form-data">
+        <label for="title">Title *</label>
+        <input id="title" name="title" type="text" required>
+
+        <label for="description">Description</label>
+        <textarea id="description" name="description" rows="3"></textarea>
+
+        <label for="files">Images (PNG, JPG, ...) *</label>
+        <input id="files" name="files" type="file" accept="image/*" multiple required>
+
+        <div class="form-actions">
+            <button type="submit">Upload</button>
+            <a href="/admin/obrazky">Back</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

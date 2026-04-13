@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Admin – Pages{% endblock %}
+{% block content %}
+<div class="admin-dashboard">
+    <h1>Pages <a href="/admin/stranky/novy" class="btn-small">+ New</a></h1>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Path</th>
+                <th>Private</th>
+                <th>Modified</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in pages %}
+            <tr>
+                <td><a href="/{{ p.path }}">{{ p.path }}</a></td>
+                <td>{% if p.private %}Yes{% else %}No{% endif %}</td>
+                <td>{{ p.modified_at|timeformat }}</td>
+                <td>
+                    <a href="/admin/stranky/{{ p.id }}/edit" class="btn btn-small">Edit</a>
+                    <form method="POST" action="/admin/stranky/{{ p.id }}/smazat" style="display:inline">
+                        <button type="submit" class="btn btn-small" onclick="return confirm('Delete?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
