@@ -11,6 +11,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub markdown: String,
     pub order_index: i32,
+    pub private: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -171,10 +171,52 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
             "serverInfo": {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION
-            }
+            },
+            "instructions": SERVER_INSTRUCTIONS
         }),
     )
 }
+
+const SERVER_INSTRUCTIONS: &str = "\
+# Personal Blog — MCP Integration
+
+Server-rendered blog. Pages are stored in PostgreSQL and served at their `path` \
+(e.g. path `obsidian/work` → URL `/obsidian/work`).
+
+## Pages
+
+- **path**: unique URL slug. Hierarchical paths use `/` (e.g. `obsidian/programing/rust`).
+- **markdown**: content in Markdown with custom extensions (see below).
+- **summary**: short description for listings.
+- **tags**: assigned by name via `edit_page`. Tags must already exist.
+- **private**: private pages are only visible to logged-in users. \
+  New pages created via MCP default to private.
+- **revisions**: every markdown change stores a diff automatically.
+
+## Markdown extensions
+
+The blog renders standard Markdown plus these custom tags:
+
+- `![[page_path]]` — **transclude**: embeds another page's rendered content inline. \
+  Recursive transclusion is detected and skipped. Private pages are hidden from \
+  unauthenticated viewers.
+- `[img ID]` — embeds an image (with link to full size and caption).
+- `[gallery ID]` — embeds a gallery grid of thumbnails.
+- `[fen FEN_STRING]` — renders a static chess board position. \
+  Optional size prefix: `[fen small FEN]` or `[fen large FEN]`.
+- `[pgn]PGN_TEXT[/pgn]` — renders a playable chess game viewer with navigation controls. \
+  Optional attributes: `[pgn move=5 size=small]PGN[/pgn]`.
+- Internal links `[Text](Path/To/Page.md)` are auto-rewritten to lowercase absolute paths \
+  (e.g. `href=\"/path/to/page\"`), so you can use either style.
+
+## Working with pages
+
+- `search_pages`: list/filter pages by path prefix and/or tag name.
+- `read_page`: read a page by exact path — returns metadata + markdown.
+- `edit_page`: create (new path) or update (existing path). Only provided fields change.
+- `list_tags`: see available tags for filtering or assigning.
+- Links between pages: `[Link text](/path/to/page)` or `[Text](Path/To/Page.md)`.
+";
 
 fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse::success(

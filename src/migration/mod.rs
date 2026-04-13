@@ -7,6 +7,7 @@ mod m_004_create_menus;
 mod m_005_create_pages;
 mod m_006_create_images;
 mod m_007_create_galleries;
+mod m_008_add_menu_private;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m_005_create_pages::Migration),
             Box::new(m_006_create_images::Migration),
             Box::new(m_007_create_galleries::Migration),
+            Box::new(m_008_add_menu_private::Migration),
         ]
     }
 }

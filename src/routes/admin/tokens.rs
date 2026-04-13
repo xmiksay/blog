@@ -50,7 +50,7 @@ pub async fn list(
             expires_at: t.expires_at.map(|e| e.to_string()),
         })
         .collect();
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/tokens.html").unwrap();
     Html(
         tmpl.render(context! { tokens, menu, logged_in => true })
@@ -94,7 +94,7 @@ pub async fn create(
         })
         .collect();
 
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/tokens.html").unwrap();
     Html(
         tmpl.render(context! { tokens, menu, logged_in => true, new_token => nonce })

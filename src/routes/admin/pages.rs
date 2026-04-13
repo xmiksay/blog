@@ -72,7 +72,7 @@ pub async fn list(
         .iter()
         .map(PageView::from)
         .collect();
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/pages.html").unwrap();
     Html(
         tmpl.render(context! { pages, menu, logged_in => true, sort })
@@ -82,7 +82,7 @@ pub async fn list(
 
 pub async fn new_form(State(state): State<AppState>) -> impl IntoResponse {
     let tags = tag::Entity::find().all(&state.db).await.unwrap_or_default();
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/page_form.html").unwrap();
     Html(
         tmpl.render(context! { menu, logged_in => true, page => (), tags })
@@ -137,7 +137,7 @@ pub async fn edit_form(State(state): State<AppState>, Path(id): Path<i32>) -> Ht
         .map(RevisionView::from)
         .collect();
 
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/page_form.html").unwrap();
     match tmpl.render(context! { page => view, page_markdown, tags, revisions, menu, logged_in => true }) {
         Ok(html) => Html(html),

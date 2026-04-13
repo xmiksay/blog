@@ -21,7 +21,7 @@ pub async fn catch_all(
 ) -> Html<String> {
     let path = req.uri().path().trim_start_matches('/').to_string();
     let logged_in = auth::is_logged_in(&state, &jar).await.is_some();
-    let nav = build_menu(&state.db).await;
+    let nav = build_menu(&state.db, logged_in).await;
 
     // 1. Check menu table
     if let Ok(Some(menu_item)) = menu::Entity::find()
@@ -29,6 +29,9 @@ pub async fn catch_all(
         .one(&state.db)
         .await
     {
+        if menu_item.private && !logged_in {
+            return render_404(&state, &nav, logged_in);
+        }
         let body_html = markdown::render(&menu_item.markdown, &state.db, logged_in).await;
         let menu_id = menu_item.id;
         let tmpl = state.tmpl.get_template("menu_page.html").unwrap();

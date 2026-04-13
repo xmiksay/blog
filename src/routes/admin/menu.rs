@@ -23,6 +23,13 @@ pub struct MenuForm {
     pub path: String,
     pub markdown: String,
     pub order_index: i32,
+    pub private: Option<String>,
+}
+
+impl MenuForm {
+    fn is_private(&self) -> bool {
+        self.private.as_deref() == Some("on")
+    }
 }
 
 pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
@@ -31,7 +38,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
         .all(&state.db)
         .await
         .unwrap_or_default();
-    let nav_menu = build_menu(&state.db).await;
+    let nav_menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/menu.html").unwrap();
     Html(
         tmpl.render(context! { menu_items, menu => nav_menu, logged_in => true })
@@ -43,11 +50,13 @@ pub async fn create(
     State(state): State<AppState>,
     Form(form): Form<MenuForm>,
 ) -> impl IntoResponse {
+    let private = form.is_private();
     menu::ActiveModel {
         title: Set(form.title),
         path: Set(form.path),
         markdown: Set(form.markdown),
         order_index: Set(form.order_index),
+        private: Set(private),
         ..Default::default()
     }
     .insert(&state.db)
@@ -62,7 +71,7 @@ pub async fn edit_form(State(state): State<AppState>, Path(id): Path<i32>) -> im
         .await
         .unwrap()
         .unwrap();
-    let nav_menu = build_menu(&state.db).await;
+    let nav_menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/menu_form.html").unwrap();
     Html(
         tmpl.render(context! { item, menu => nav_menu, logged_in => true })
@@ -81,10 +90,12 @@ pub async fn update(
         .unwrap()
         .unwrap();
     let mut active: menu::ActiveModel = model.into();
+    let private = form.is_private();
     active.title = Set(form.title);
     active.path = Set(form.path);
     active.markdown = Set(form.markdown);
     active.order_index = Set(form.order_index);
+    active.private = Set(private);
     active.update(&state.db).await.unwrap();
     Redirect::to("/admin/menu")
 }

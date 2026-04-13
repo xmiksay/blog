@@ -64,7 +64,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
             created_at: m.created_at.to_string(),
         })
         .collect();
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/images.html").unwrap();
     Html(
         tmpl.render(context! { images, menu, logged_in => true })
@@ -73,7 +73,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn upload_form(State(state): State<AppState>) -> impl IntoResponse {
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/image_upload.html").unwrap();
     Html(
         tmpl.render(context! { menu, logged_in => true })
@@ -157,7 +157,7 @@ pub async fn edit_form(State(state): State<AppState>, Path(id): Path<i32>) -> im
         description: img.description,
         created_at: img.created_at.to_string(),
     };
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/image_edit.html").unwrap();
     Html(
         tmpl.render(context! { image => view, menu, logged_in => true })

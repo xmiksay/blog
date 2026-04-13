@@ -36,7 +36,7 @@ pub async fn by_tag(
     Query(pagination): Query<Pagination>,
 ) -> Html<String> {
     let logged_in = auth::is_logged_in(&state, &jar).await.is_some();
-    let nav = build_menu(&state.db).await;
+    let nav = build_menu(&state.db, logged_in).await;
 
     // Find the tag
     let tag_model = match tag::Entity::find_by_id(tag_id)

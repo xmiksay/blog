@@ -29,7 +29,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
         .all(&state.db)
         .await
         .unwrap_or_default();
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/tags.html").unwrap();
     Html(
         tmpl.render(context! { tags, menu, logged_in => true })
@@ -58,7 +58,7 @@ pub async fn edit_form(State(state): State<AppState>, Path(id): Path<i32>) -> im
         .await
         .unwrap()
         .unwrap();
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/tag_form.html").unwrap();
     Html(
         tmpl.render(context! { tag => item, menu, logged_in => true })

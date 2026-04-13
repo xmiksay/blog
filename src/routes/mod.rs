@@ -3,7 +3,7 @@ pub mod mcp;
 pub mod public;
 pub mod revision;
 
-use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::entity::menu;
 
@@ -13,9 +13,12 @@ pub struct MenuItem {
     pub label: String,
 }
 
-pub async fn build_menu(db: &DatabaseConnection) -> Vec<MenuItem> {
-    menu::Entity::find()
-        .order_by_asc(menu::Column::OrderIndex)
+pub async fn build_menu(db: &DatabaseConnection, logged_in: bool) -> Vec<MenuItem> {
+    let mut query = menu::Entity::find().order_by_asc(menu::Column::OrderIndex);
+    if !logged_in {
+        query = query.filter(menu::Column::Private.eq(false));
+    }
+    query
         .all(db)
         .await
         .unwrap_or_default()

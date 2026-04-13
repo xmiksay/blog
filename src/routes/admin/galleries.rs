@@ -62,7 +62,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
 
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/galleries.html").unwrap();
     Html(
         tmpl.render(context! { galleries => views, menu, logged_in => true })
@@ -71,7 +71,7 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn new_form(State(state): State<AppState>) -> impl IntoResponse {
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/gallery_form.html").unwrap();
     Html(
         tmpl.render(context! { menu, logged_in => true, gallery => () })
@@ -140,7 +140,7 @@ pub async fn edit_form(State(state): State<AppState>, Path(id): Path<i32>) -> im
         created_at: gal.created_at.to_string(),
     };
 
-    let menu = build_menu(&state.db).await;
+    let menu = build_menu(&state.db, true).await;
     let tmpl = state.tmpl.get_template("admin/gallery_form.html").unwrap();
     Html(
         tmpl.render(context! {

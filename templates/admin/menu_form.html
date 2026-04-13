@@ -17,6 +17,8 @@
         <label for="order_index">Order</label>
         <input id="order_index" name="order_index" type="number" value="{{ item.order_index }}" min="0">
 
+        <label><input type="checkbox" name="private" {% if item.private %}checked{% endif %}> Private</label>
+
         <div class="form-actions">
             <button type="submit">Save</button>
             <a href="/admin/menu">Back</a>
