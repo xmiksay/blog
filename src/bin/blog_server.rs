@@ -20,10 +20,11 @@ async fn main() {
         .await
         .expect("Migrations failed");
 
-    use blog::routes::{admin, mcp, public};
+    use blog::routes::{admin, mcp, oauth, public};
 
     let app = Router::new()
         .merge(mcp::router())
+        .merge(oauth::router())
         .nest("/obrazky", public::images::router())
         .nest("/tag", public::tags::router())
         .nest("/admin", admin::router(state.clone()))

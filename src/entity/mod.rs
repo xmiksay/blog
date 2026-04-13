@@ -1,6 +1,9 @@
 pub mod gallery;
 pub mod image;
 pub mod menu;
+pub mod oauth_client;
+pub mod oauth_code;
+pub mod oauth_token;
 pub mod page;
 pub mod page_revision;
 pub mod tag;

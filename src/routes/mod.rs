@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod mcp;
+pub mod oauth;
 pub mod public;
 pub mod revision;
 

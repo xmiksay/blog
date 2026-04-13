@@ -1,6 +1,6 @@
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use sea_orm::{
@@ -9,8 +9,8 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::entity::{page, tag, token};
-use crate::routes::revision;
+use crate::entity::{page, tag};
+use crate::routes::{oauth, revision};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -97,67 +97,36 @@ struct SearchPagesArgs {
     tag: Option<String>,
 }
 
-// --- Auth via service token ---
-
-async fn authenticate(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<i32, (StatusCode, Json<JsonRpcResponse>)> {
-    let nonce = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(JsonRpcResponse::error(None, -32000, "Missing Bearer token")),
-            )
-        })?;
-
-    let tok = token::Entity::find()
-        .filter(token::Column::Nonce.eq(nonce))
-        .filter(token::Column::IsService.eq(true))
-        .one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(JsonRpcResponse::error(None, -32000, e.to_string())),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(JsonRpcResponse::error(None, -32000, "Invalid service token")),
-            )
-        })?;
-
-    Ok(tok.user_id)
-}
-
 // --- MCP endpoint ---
 
 pub async fn handle(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
-) -> impl IntoResponse {
-    let user_id = match authenticate(&state, &headers).await {
+) -> Response {
+    let user_id = match oauth::authenticate_mcp(&state, &headers).await {
         Ok(uid) => uid,
-        Err(e) => return e,
+        Err((status, www_auth)) => {
+            let body = Json(JsonRpcResponse::error(None, -32000, "Unauthorized"));
+            let mut response: Response = (status, body).into_response();
+            if let Ok(val) = HeaderValue::from_str(&www_auth) {
+                response.headers_mut().insert("WWW-Authenticate", val);
+            }
+            return response;
+        }
     };
 
     let resp = match req.method.as_str() {
         "initialize" => handle_initialize(req.id),
         "notifications/initialized" => {
-            return (StatusCode::OK, Json(JsonRpcResponse::success(req.id, json!({}))));
+            return (StatusCode::OK, Json(JsonRpcResponse::success(req.id, json!({})))).into_response();
         }
         "tools/list" => handle_tools_list(req.id),
         "tools/call" => handle_tools_call(&state, user_id, req.id.clone(), req.params).await,
         _ => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", req.method)),
     };
 
-    (StatusCode::OK, Json(resp))
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
