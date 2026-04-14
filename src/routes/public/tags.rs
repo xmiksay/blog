@@ -59,7 +59,7 @@ pub async fn by_tag(
         .filter(
             Condition::all().add(
                 sea_orm::sea_query::Expr::cust_with_values(
-                    "tag_ids @> ARRAY[?]::int[]",
+                    "? = ANY(tag_ids)",
                     [tag_model.id],
                 ),
             ),

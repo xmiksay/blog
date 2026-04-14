@@ -4,7 +4,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -95,6 +96,10 @@ struct SearchPagesArgs {
     prefix: Option<String>,
     #[serde(default)]
     tag: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    offset: Option<u64>,
 }
 
 // --- MCP endpoint ---
@@ -252,7 +257,7 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                 },
                 {
                     "name": "search_pages",
-                    "description": "Search pages by path prefix and/or tag name. Returns path, summary for each match.",
+                    "description": "Search pages by path prefix and/or tag name. Returns path, summary for each match, plus total count and has_more flag for pagination.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -263,6 +268,14 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                             "tag": {
                                 "type": "string",
                                 "description": "Optional tag name — only returns pages with this tag"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Max results to return (default 20, max 100)"
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Number of results to skip for pagination (default 0)"
                             }
                         }
                     }
@@ -463,15 +476,15 @@ async fn tool_search_pages(
         Err(e) => return tool_error(id, &format!("Invalid arguments: {e}")),
     };
 
-    let mut query = page::Entity::find().order_by_desc(page::Column::ModifiedAt);
+    // Build filter condition
+    let mut condition = Condition::all();
 
     if let Some(prefix) = &args.prefix {
         if !prefix.is_empty() {
-            query = query.filter(page::Column::Path.starts_with(prefix));
+            condition = condition.add(page::Column::Path.starts_with(prefix));
         }
     }
 
-    // Resolve tag name to id and filter by array containment
     if let Some(tag_name) = &args.tag {
         if !tag_name.is_empty() {
             let tag_model = tag::Entity::find()
@@ -481,12 +494,10 @@ async fn tool_search_pages(
 
             match tag_model {
                 Ok(Some(t)) => {
-                    query = query.filter(
-                        Condition::all().add(sea_orm::sea_query::Expr::cust_with_values(
-                            "tag_ids @> ARRAY[?]::int[]",
-                            [t.id],
-                        )),
-                    );
+                    condition = condition.add(sea_orm::sea_query::Expr::cust_with_values(
+                        "? = ANY(tag_ids)",
+                        [t.id],
+                    ));
                 }
                 Ok(None) => {
                     return tool_result(id, "No pages found.".into());
@@ -496,16 +507,37 @@ async fn tool_search_pages(
         }
     }
 
-    let pages = match query.all(&state.db).await {
+    let limit = args.limit.unwrap_or(20).min(100);
+    let offset = args.offset.unwrap_or(0);
+
+    let total = match page::Entity::find()
+        .filter(condition.clone())
+        .count(&state.db)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => return tool_error(id, &format!("Database error: {e}")),
+    };
+
+    if total == 0 {
+        return tool_result(id, "No pages found.".into());
+    }
+
+    let pages: Vec<page::Model> = match page::Entity::find()
+        .filter(condition)
+        .order_by_desc(page::Column::ModifiedAt)
+        .offset(offset)
+        .limit(limit)
+        .all(&state.db)
+        .await
+    {
         Ok(p) => p,
         Err(e) => return tool_error(id, &format!("Database error: {e}")),
     };
 
-    if pages.is_empty() {
-        return tool_result(id, "No pages found.".into());
-    }
+    let has_more = offset + limit < total;
 
-    let out = pages
+    let mut out = pages
         .iter()
         .map(|p| match &p.summary {
             Some(s) if !s.is_empty() => format!("{}: {s}", p.path),
@@ -513,6 +545,12 @@ async fn tool_search_pages(
         })
         .collect::<Vec<_>>()
         .join("\n");
+
+    out.push_str(&format!("\n\n--- total: {total}, has_more: {has_more}"));
+    if has_more {
+        out.push_str(&format!(", next_offset: {}", offset + limit));
+    }
+    out.push_str(" ---");
 
     tool_result(id, out)
 }
