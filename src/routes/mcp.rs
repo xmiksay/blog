@@ -117,7 +117,7 @@ pub async fn handle(
     };
 
     let resp = match req.method.as_str() {
-        "initialize" => handle_initialize(req.id),
+        "initialize" => handle_initialize(&state, req.id).await,
         "notifications/initialized" => {
             return (StatusCode::OK, Json(JsonRpcResponse::success(req.id, json!({})))).into_response();
         }
@@ -129,7 +129,16 @@ pub async fn handle(
     (StatusCode::OK, Json(resp)).into_response()
 }
 
-fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
+async fn handle_initialize(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    let instructions = match page::Entity::find()
+        .filter(page::Column::Path.eq("CLAUDE"))
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(p)) => p.markdown,
+        _ => SERVER_INSTRUCTIONS.to_string(),
+    };
+
     JsonRpcResponse::success(
         id,
         json!({
@@ -141,7 +150,7 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION
             },
-            "instructions": SERVER_INSTRUCTIONS
+            "instructions": instructions
         }),
     )
 }
@@ -474,7 +483,7 @@ async fn tool_search_pages(
                 Ok(Some(t)) => {
                     query = query.filter(
                         Condition::all().add(sea_orm::sea_query::Expr::cust_with_values(
-                            "tag_ids @> ARRAY[$1]::int[]",
+                            "tag_ids @> ARRAY[?]::int[]",
                             [t.id],
                         )),
                     );

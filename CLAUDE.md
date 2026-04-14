@@ -118,6 +118,41 @@ galleries
 | `/admin/galerie` | CRUD | Gallery management |
 | `/admin/tokeny` | CRUD | Service token management (for MCP) |
 
+## MCP Server (Claude Code Integration)
+
+The blog exposes an MCP (Model Context Protocol) server at `/mcp/*` routes, allowing Claude Code to read and edit pages via tools.
+
+### How Tool Descriptions Reach Claude
+
+All MCP metadata is defined in `src/routes/mcp.rs`:
+
+| Constant / Field | Location | What Claude Sees |
+|---|---|---|
+| `SERVER_INSTRUCTIONS` | line ~149 | Top-level server description in system reminders — explains page model, markdown extensions, and how to use tools |
+| Tool `"description"` | `handle_tools_list()`, line ~190 | Per-tool summary shown when Claude discovers available tools |
+| Property `"description"` | Inside each tool's `inputSchema` | Parameter-level hints Claude uses when calling a tool |
+
+### Tuning Descriptions
+
+To change what Claude sees about your blog tools, edit these strings directly in `src/routes/mcp.rs`:
+
+- **`SERVER_INSTRUCTIONS`** — high-level guidance: what a page is, what markdown extensions exist, how tools relate to each other. Keep this concise; Claude reads it on every conversation.
+- **Tool `description`** — one sentence per tool explaining what it does and returns. Claude uses this to decide *which* tool to call.
+- **Parameter `description`** — explains each parameter's purpose, format, and defaults. Claude uses these to fill in correct values.
+
+### Tools
+
+| Tool | Description |
+|---|---|
+| `read_page` | Read a page by exact path — returns metadata + markdown |
+| `edit_page` | Create or update a page. Only provided fields change. Stores revision diffs automatically |
+| `search_pages` | Filter pages by path prefix and/or tag name |
+| `list_tags` | List all tags (name + description) |
+
+### Auth
+
+MCP routes use service tokens (created via `/admin/tokeny`). The token is sent as a Bearer token in the `Authorization` header. The MCP handler resolves the token to a user ID for audit fields (`created_by`, `modified_by`).
+
 ## Docker
 
 ```bash
