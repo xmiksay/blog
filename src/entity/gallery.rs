@@ -5,10 +5,12 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    #[sea_orm(unique)]
+    pub path: String,
     pub title: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
-    pub image_ids: Vec<i32>,
+    pub file_ids: Vec<i32>,
     pub created_at: DateTimeWithTimeZone,
     pub created_by: i32,
 }

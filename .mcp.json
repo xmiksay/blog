@@ -1,10 +1,10 @@
 {
   "mcpServers": {
-    "blog": {
+    "site": {
       "type": "http",
       "url": "https://miksanik.net/mcp",
       "headers": {
-        "Authorization": "Bearer ${BLOG_MCP_TOKEN}"
+        "Authorization": "Bearer ${SITE_MCP_TOKEN}"
       }
     }
   }

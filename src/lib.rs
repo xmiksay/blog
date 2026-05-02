@@ -1,6 +1,12 @@
+pub mod ai;
+pub mod assets;
 pub mod auth;
+pub mod config;
 pub mod entity;
+pub mod files;
 pub mod markdown;
 pub mod migration;
+pub mod path_util;
+pub mod repo;
 pub mod routes;
 pub mod state;

@@ -3,16 +3,19 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 use axum::{
+    Json,
     extract::{Request, State},
+    http::StatusCode,
     middleware::Next,
-    response::{Redirect, Response},
+    response::{IntoResponse, Response},
 };
 use axum_extra::extract::CookieJar;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use serde_json::json;
 
 use crate::{entity::token, state::AppState};
 
-pub const SESSION_COOKIE: &str = "blog_session";
+pub const SESSION_COOKIE: &str = "site_session";
 pub const SESSION_HOURS: i64 = 24;
 
 pub fn hash_password(password: &str) -> String {
@@ -31,41 +34,48 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 }
 
 pub fn generate_token() -> String {
-    use rand::Rng;
-    let bytes: [u8; 32] = rand::thread_rng().r#gen();
+    use rand::RngExt;
+    let bytes: [u8; 32] = rand::rng().random();
     hex::encode(bytes)
 }
 
-/// Middleware: verify session cookie, redirect to login if invalid.
-pub async fn require_login(
+/// Middleware: verify session cookie for /api/*. Returns 401 JSON on failure.
+pub async fn require_login_api(
     State(state): State<AppState>,
     jar: CookieJar,
     mut req: Request,
     next: Next,
-) -> Result<Response, Redirect> {
-    let nonce = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .ok_or_else(|| Redirect::to("/admin/login"))?;
+) -> Response {
+    let Some(nonce) = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()) else {
+        return unauthorized();
+    };
 
-    let tok = token::Entity::find()
+    let Ok(Some(tok)) = token::Entity::find()
         .filter(token::Column::Nonce.eq(&nonce))
         .filter(token::Column::IsService.eq(false))
         .one(&state.db)
         .await
-        .map_err(|_| Redirect::to("/admin/login"))?
-        .ok_or_else(|| Redirect::to("/admin/login"))?;
+    else {
+        return unauthorized();
+    };
 
-    // Check expiration
     if let Some(expires) = tok.expires_at {
         let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
         if expires < now {
-            return Err(Redirect::to("/admin/login"));
+            return unauthorized();
         }
     }
 
     req.extensions_mut().insert(tok.user_id);
-    Ok(next.run(req).await)
+    next.run(req).await
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized" })),
+    )
+        .into_response()
 }
 
 /// Check if request has valid session (non-blocking, for template use).

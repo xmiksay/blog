@@ -3,22 +3,28 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::entity::{page, tag};
-use crate::routes::{oauth, revision};
+use base64::Engine;
+
+use crate::auth;
+use crate::repo::{
+    files::{self as files_repo, FileMetaUpdate, NewFile},
+    galleries::{self as galleries_repo, GalleryInput as RepoGalleryInput},
+    menu::{self as menu_repo, MenuInput as RepoMenuInput},
+    pages::{self as pages_repo, PageUpdate, UpsertOutcome},
+    tags::{self as tags_repo, ResolveError, TagInput as RepoTagInput, TagUpdate as RepoTagUpdate},
+    tokens::{self as tokens_repo, DeleteError as TokenDeleteError, ServiceTokenInput},
+};
+use crate::routes::oauth;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/mcp", post(handle))
 }
 
-const SERVER_NAME: &str = "blog";
+const SERVER_NAME: &str = "site";
 const SERVER_VERSION: &str = "1.0.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
@@ -88,6 +94,8 @@ struct EditPageArgs {
     summary: Option<String>,
     #[serde(default)]
     tag_names: Option<Vec<String>>,
+    #[serde(default)]
+    private: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -97,9 +105,148 @@ struct SearchPagesArgs {
     #[serde(default)]
     tag: Option<String>,
     #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
     limit: Option<u64>,
     #[serde(default)]
     offset: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ListPagePathsArgs {
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DeletePageArgs {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct RestorePageRevisionArgs {
+    path: String,
+    revision_id: i32,
+}
+
+#[derive(Deserialize)]
+struct TagArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct TagInputArgs {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateTagArgs {
+    name: String,
+    #[serde(default)]
+    new_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListFilesArgs {
+    #[serde(default)]
+    mime_prefix: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FileIdArgs {
+    id: i32,
+}
+
+#[derive(Deserialize)]
+struct CreateFileArgs {
+    path: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    mimetype: Option<String>,
+    #[serde(default)]
+    data_base64: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateFileArgs {
+    id: i32,
+    path: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GalleryIdArgs {
+    id: i32,
+}
+
+#[derive(Deserialize)]
+struct CreateGalleryArgs {
+    path: String,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    file_ids: Vec<i32>,
+}
+
+#[derive(Deserialize)]
+struct UpdateGalleryArgs {
+    id: i32,
+    path: String,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    file_ids: Vec<i32>,
+}
+
+#[derive(Deserialize)]
+struct MenuIdArgs {
+    id: i32,
+}
+
+#[derive(Deserialize)]
+struct CreateMenuArgs {
+    title: String,
+    path: String,
+    #[serde(default)]
+    markdown: Option<String>,
+    order_index: i32,
+    #[serde(default)]
+    private: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateMenuArgs {
+    id: i32,
+    title: String,
+    path: String,
+    #[serde(default)]
+    markdown: Option<String>,
+    order_index: i32,
+    #[serde(default)]
+    private: bool,
+}
+
+#[derive(Deserialize)]
+struct CreateTokenArgs {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteTokenArgs {
+    id: i32,
 }
 
 // --- MCP endpoint ---
@@ -135,13 +282,9 @@ pub async fn handle(
 }
 
 async fn handle_initialize(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
-    let instructions = match page::Entity::find()
-        .filter(page::Column::Path.eq("CLAUDE"))
-        .one(&state.db)
-        .await
-    {
+    let instructions = match pages_repo::find_by_path(&state.db, "CLAUDE").await {
         Ok(Some(p)) => p.markdown,
-        _ => SERVER_INSTRUCTIONS.to_string(),
+        _ => server_instructions(),
     };
 
     JsonRpcResponse::success(
@@ -160,15 +303,24 @@ async fn handle_initialize(state: &AppState, id: Option<Value>) -> JsonRpcRespon
     )
 }
 
-const SERVER_INSTRUCTIONS: &str = "\
-# Personal Blog — MCP Integration
+fn server_instructions() -> String {
+    format!("{SERVER_INSTRUCTIONS_HEADER}\n{}\n", crate::markdown::MARKDOWN_EXTENSIONS_DOC)
+}
 
-Server-rendered blog. Pages are stored in PostgreSQL and served at their `path` \
-(e.g. path `obsidian/work` → URL `/obsidian/work`).
+const SERVER_INSTRUCTIONS_HEADER: &str = "\
+# Site — MCP Integration
+
+Server-rendered site. Pages are stored in PostgreSQL and served at their `path` \
+(e.g. path `notes/example` → URL `/notes/example`).
+
+The full site admin API is exposed as MCP tools — pages, tags, files, \
+galleries, menu items and service tokens can all be managed here. To override \
+these instructions for your installation, create a page with path `CLAUDE` and \
+its markdown will be served instead.
 
 ## Pages
 
-- **path**: unique URL slug. Hierarchical paths use `/` (e.g. `obsidian/programing/rust`).
+- **path**: unique URL slug. Hierarchical paths use `/` (e.g. `section/sub/page`).
 - **markdown**: content in Markdown with custom extensions (see below).
 - **summary**: short description for listings.
 - **tags**: assigned by name via `edit_page`. Tags must already exist.
@@ -178,27 +330,6 @@ Server-rendered blog. Pages are stored in PostgreSQL and served at their `path` 
 
 ## Markdown extensions
 
-The blog renders standard Markdown plus these custom tags:
-
-- `![[page_path]]` — **transclude**: embeds another page's rendered content inline. \
-  Recursive transclusion is detected and skipped. Private pages are hidden from \
-  unauthenticated viewers.
-- `[img ID]` — embeds an image (with link to full size and caption).
-- `[gallery ID]` — embeds a gallery grid of thumbnails.
-- `[fen FEN_STRING]` — renders a static chess board position. \
-  Optional size prefix: `[fen small FEN]` or `[fen large FEN]`.
-- `[pgn]PGN_TEXT[/pgn]` — renders a playable chess game viewer with navigation controls. \
-  Optional attributes: `[pgn move=5 size=small]PGN[/pgn]`.
-- Internal links `[Text](Path/To/Page.md)` are auto-rewritten to lowercase absolute paths \
-  (e.g. `href=\"/path/to/page\"`), so you can use either style.
-
-## Working with pages
-
-- `search_pages`: list/filter pages by path prefix and/or tag name.
-- `read_page`: read a page by exact path — returns metadata + markdown.
-- `edit_page`: create (new path) or update (existing path). Only provided fields change.
-- `list_tags`: see available tags for filtering or assigning.
-- Links between pages: `[Link text](/path/to/page)` or `[Text](Path/To/Page.md)`.
 ";
 
 fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
@@ -206,17 +337,13 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
         id,
         json!({
             "tools": [
+                // ----- Pages -----
                 {
                     "name": "read_page",
                     "description": "Read a page by its path. Returns title (path), summary, tags, and full markdown content.",
                     "inputSchema": {
                         "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "The page path (e.g. 'infra/desktop/syncthing')"
-                            }
-                        },
+                        "properties": { "path": { "type": "string", "description": "The page path (e.g. 'section/sub/page')" } },
                         "required": ["path"]
                     }
                 },
@@ -226,58 +353,301 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "The page path to edit"
-                            },
-                            "markdown": {
-                                "type": "string",
-                                "description": "New markdown content (optional)"
-                            },
-                            "summary": {
-                                "type": "string",
-                                "description": "New summary (optional)"
-                            },
-                            "tag_names": {
-                                "type": "array",
-                                "items": { "type": "string" },
-                                "description": "Tag names to assign (optional, replaces existing tags)"
-                            }
+                            "path": { "type": "string", "description": "The page path to edit" },
+                            "markdown": { "type": "string", "description": "New markdown content (optional)" },
+                            "summary": { "type": "string", "description": "New summary (optional)" },
+                            "tag_names": { "type": "array", "items": { "type": "string" }, "description": "Tag names to assign (optional, replaces existing tags)" },
+                            "private": { "type": "boolean", "description": "Visibility flag (optional, defaults to true on create)" }
                         },
                         "required": ["path"]
                     }
                 },
                 {
-                    "name": "list_tags",
-                    "description": "List all available tags. Returns tag name and description.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
                     "name": "search_pages",
-                    "description": "Search pages by path prefix and/or tag name. Returns path, summary for each match, plus total count and has_more flag for pagination.",
+                    "description": "Search pages by path prefix, tag name, and/or fulltext query (q). Path and tag matches rank above markdown content matches. Returns path, summary for each match, plus total count and has_more flag for pagination.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "prefix": {
-                                "type": "string",
-                                "description": "Path prefix to filter by (case-insensitive). If omitted, returns all pages."
-                            },
-                            "tag": {
-                                "type": "string",
-                                "description": "Optional tag name — only returns pages with this tag"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Max results to return (default 20, max 100)"
-                            },
-                            "offset": {
-                                "type": "integer",
-                                "description": "Number of results to skip for pagination (default 0)"
-                            }
+                            "prefix": { "type": "string", "description": "Path prefix to filter by (case-insensitive). If omitted, returns all pages." },
+                            "tag": { "type": "string", "description": "Optional tag name — only returns pages with this tag" },
+                            "q": { "type": "string", "description": "Optional fulltext query (accent-insensitive); ranks path and tag matches above markdown content" },
+                            "limit": { "type": "integer", "description": "Max results to return (default 20, max 100)" },
+                            "offset": { "type": "integer", "description": "Number of results to skip for pagination (default 0)" }
                         }
+                    }
+                },
+                {
+                    "name": "list_page_paths",
+                    "description": "Return only the path strings of pages, sorted ascending. Lightweight — useful for path autocomplete and discovery.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "prefix": { "type": "string", "description": "Optional path prefix filter (case-insensitive)" },
+                            "limit": { "type": "integer", "description": "Max paths to return" }
+                        }
+                    }
+                },
+                {
+                    "name": "delete_page",
+                    "description": "Delete a page by its path.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "restore_page_revision",
+                    "description": "Restore a page to the markdown content of a prior revision (looked up by revision_id).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "revision_id": { "type": "integer" }
+                        },
+                        "required": ["path", "revision_id"]
+                    }
+                },
+
+                // ----- Tags -----
+                {
+                    "name": "list_tags",
+                    "description": "List all available tags. Returns tag name and description.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "read_tag",
+                    "description": "Read a single tag by name.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "name": { "type": "string" } },
+                        "required": ["name"]
+                    }
+                },
+                {
+                    "name": "create_tag",
+                    "description": "Create a new tag.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "description": { "type": "string" }
+                        },
+                        "required": ["name"]
+                    }
+                },
+                {
+                    "name": "update_tag",
+                    "description": "Update an existing tag's name and/or description (look up by current name).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Current name (lookup key)" },
+                            "new_name": { "type": "string" },
+                            "description": { "type": "string" }
+                        },
+                        "required": ["name"]
+                    }
+                },
+                {
+                    "name": "delete_tag",
+                    "description": "Delete a tag by name.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "name": { "type": "string" } },
+                        "required": ["name"]
+                    }
+                },
+
+                // ----- Files -----
+                {
+                    "name": "list_files",
+                    "description": "List uploaded files. Optionally filter by mimetype prefix (e.g. 'image/').",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "mime_prefix": { "type": "string" }
+                        }
+                    }
+                },
+                {
+                    "name": "create_file",
+                    "description": "Upload a file at the given path. Provide either `data_base64` (binary, e.g. images) or `data` (raw text, e.g. PGN/FEN/SVG). The display title is derived from the basename of the path. Returns the new file id (referenceable via `::img{id=ID}` / `::gallery{id=ID}` in markdown). Generates a thumbnail automatically for images.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string", "description": "Filename or path used as the file's identifier (must be unique)." },
+                            "description": { "type": "string" },
+                            "mimetype": { "type": "string", "description": "e.g. image/png. Defaults to application/octet-stream." },
+                            "data_base64": { "type": "string", "description": "Base64-encoded binary contents." },
+                            "data": { "type": "string", "description": "Raw text contents (alternative to data_base64)." }
+                        },
+                        "required": ["path"]
+                    }
+                },
+                {
+                    "name": "read_file",
+                    "description": "Read file metadata by ID (does not return binary contents).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
+                    }
+                },
+                {
+                    "name": "update_file",
+                    "description": "Update file metadata (path, description). The display title is always derived from the path basename.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "path": { "type": "string" },
+                            "description": { "type": "string" }
+                        },
+                        "required": ["id", "path"]
+                    }
+                },
+                {
+                    "name": "delete_file",
+                    "description": "Delete a file by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
+                    }
+                },
+
+                // ----- Galleries -----
+                {
+                    "name": "list_galleries",
+                    "description": "List all galleries.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "read_gallery",
+                    "description": "Read a gallery by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
+                    }
+                },
+                {
+                    "name": "create_gallery",
+                    "description": "Create a gallery from a list of file IDs. `path` is the unique URL slug (e.g. `holiday-2024`).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "title": { "type": "string" },
+                            "description": { "type": "string" },
+                            "file_ids": { "type": "array", "items": { "type": "integer" } }
+                        },
+                        "required": ["path", "title"]
+                    }
+                },
+                {
+                    "name": "update_gallery",
+                    "description": "Update a gallery (replaces all fields).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "path": { "type": "string" },
+                            "title": { "type": "string" },
+                            "description": { "type": "string" },
+                            "file_ids": { "type": "array", "items": { "type": "integer" } }
+                        },
+                        "required": ["id", "path", "title"]
+                    }
+                },
+                {
+                    "name": "delete_gallery",
+                    "description": "Delete a gallery by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
+                    }
+                },
+
+                // ----- Menu -----
+                {
+                    "name": "list_menu",
+                    "description": "List all menu items in display order.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "read_menu_item",
+                    "description": "Read a menu item by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
+                    }
+                },
+                {
+                    "name": "create_menu_item",
+                    "description": "Create a menu item.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" },
+                            "path": { "type": "string" },
+                            "markdown": { "type": "string" },
+                            "order_index": { "type": "integer" },
+                            "private": { "type": "boolean" }
+                        },
+                        "required": ["title", "path", "order_index"]
+                    }
+                },
+                {
+                    "name": "update_menu_item",
+                    "description": "Update a menu item (replaces all fields).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "title": { "type": "string" },
+                            "path": { "type": "string" },
+                            "markdown": { "type": "string" },
+                            "order_index": { "type": "integer" },
+                            "private": { "type": "boolean" }
+                        },
+                        "required": ["id", "title", "path", "order_index"]
+                    }
+                },
+                {
+                    "name": "delete_menu_item",
+                    "description": "Delete a menu item by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
+                    }
+                },
+
+                // ----- Tokens (service tokens, owned by caller) -----
+                {
+                    "name": "list_tokens",
+                    "description": "List the caller's service tokens.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "create_token",
+                    "description": "Create a new service token. The nonce is returned ONCE — store it securely.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "label": { "type": "string" } }
+                    }
+                },
+                {
+                    "name": "delete_token",
+                    "description": "Revoke a service token by ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "id": { "type": "integer" } },
+                        "required": ["id"]
                     }
                 }
             ]
@@ -300,10 +670,47 @@ async fn handle_tools_call(
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match tool_name {
+        // pages
         "read_page" => tool_read_page(state, id, arguments).await,
         "edit_page" => tool_edit_page(state, user_id, id, arguments).await,
-        "list_tags" => tool_list_tags(state, id).await,
         "search_pages" => tool_search_pages(state, id, arguments).await,
+        "list_page_paths" => tool_list_page_paths(state, id, arguments).await,
+        "delete_page" => tool_delete_page(state, id, arguments).await,
+        "restore_page_revision" => tool_restore_page_revision(state, user_id, id, arguments).await,
+
+        // tags
+        "list_tags" => tool_list_tags(state, id).await,
+        "read_tag" => tool_read_tag(state, id, arguments).await,
+        "create_tag" => tool_create_tag(state, id, arguments).await,
+        "update_tag" => tool_update_tag(state, id, arguments).await,
+        "delete_tag" => tool_delete_tag(state, id, arguments).await,
+
+        // files
+        "list_files" => tool_list_files(state, id, arguments).await,
+        "create_file" => tool_create_file(state, user_id, id, arguments).await,
+        "read_file" => tool_read_file(state, id, arguments).await,
+        "update_file" => tool_update_file(state, id, arguments).await,
+        "delete_file" => tool_delete_file(state, id, arguments).await,
+
+        // galleries
+        "list_galleries" => tool_list_galleries(state, id).await,
+        "read_gallery" => tool_read_gallery(state, id, arguments).await,
+        "create_gallery" => tool_create_gallery(state, user_id, id, arguments).await,
+        "update_gallery" => tool_update_gallery(state, id, arguments).await,
+        "delete_gallery" => tool_delete_gallery(state, id, arguments).await,
+
+        // menu
+        "list_menu" => tool_list_menu(state, id).await,
+        "read_menu_item" => tool_read_menu(state, id, arguments).await,
+        "create_menu_item" => tool_create_menu(state, id, arguments).await,
+        "update_menu_item" => tool_update_menu(state, id, arguments).await,
+        "delete_menu_item" => tool_delete_menu(state, id, arguments).await,
+
+        // tokens
+        "list_tokens" => tool_list_tokens(state, user_id, id).await,
+        "create_token" => tool_create_token(state, user_id, id, arguments).await,
+        "delete_token" => tool_delete_token(state, user_id, id, arguments).await,
+
         _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
     }
 }
@@ -333,26 +740,30 @@ fn tool_error(id: Option<Value>, message: &str) -> JsonRpcResponse {
     )
 }
 
-// --- Tool implementations ---
+fn json_result(id: Option<Value>, value: Value) -> JsonRpcResponse {
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    tool_result(id, text)
+}
 
-async fn tool_read_page(
-    state: &AppState,
+fn parse_args<T: serde::de::DeserializeOwned>(
     id: Option<Value>,
     arguments: Value,
-) -> JsonRpcResponse {
-    let args: ReadPageArgs = match serde_json::from_value(arguments) {
+) -> Result<T, JsonRpcResponse> {
+    serde_json::from_value(arguments)
+        .map_err(|e| tool_error(id, &format!("Invalid arguments: {e}")))
+}
+
+// ============================== Pages ==============================
+
+async fn tool_read_page(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: ReadPageArgs = match parse_args(id.clone(), arguments) {
         Ok(a) => a,
-        Err(e) => return tool_error(id, &format!("Invalid arguments: {e}")),
+        Err(r) => return r,
     };
 
-    let pg = page::Entity::find()
-        .filter(page::Column::Path.eq(&args.path))
-        .one(&state.db)
-        .await;
-
-    match pg {
+    match pages_repo::find_by_path(&state.db, &args.path).await {
         Ok(Some(p)) => {
-            let tag_names = resolve_tag_names(state, &p.tag_ids).await;
+            let tag_names = tags_repo::resolve_names(&state.db, &p.tag_ids).await;
             let mut out = format!("# {}\n\n", p.path);
             if !tag_names.is_empty() {
                 out.push_str(&format!("Tags: {}\n", tag_names.join(", ")));
@@ -379,91 +790,46 @@ async fn tool_edit_page(
     id: Option<Value>,
     arguments: Value,
 ) -> JsonRpcResponse {
-    let args: EditPageArgs = match serde_json::from_value(arguments) {
+    let args: EditPageArgs = match parse_args(id.clone(), arguments) {
         Ok(a) => a,
-        Err(e) => return tool_error(id, &format!("Invalid arguments: {e}")),
+        Err(r) => return r,
     };
 
-    if args.markdown.is_none() && args.summary.is_none() && args.tag_names.is_none() {
-        return tool_error(id, "Nothing to update — provide markdown, summary, or tag_names");
+    if args.markdown.is_none()
+        && args.summary.is_none()
+        && args.tag_names.is_none()
+        && args.private.is_none()
+    {
+        return tool_error(id, "Nothing to update — provide markdown, summary, tag_names, or private");
     }
 
-    let now = chrono::Utc::now().fixed_offset();
-
-    // Resolve tag names to IDs if provided
     let tag_ids = match &args.tag_names {
-        Some(names) if !names.is_empty() => {
-            match resolve_tag_ids(state, names).await {
-                Ok(ids) => Some(ids),
-                Err(e) => return tool_error(id, &e),
-            }
-        }
+        Some(names) if !names.is_empty() => match tags_repo::resolve_ids(&state.db, names).await {
+            Ok(ids) => Some(ids),
+            Err(ResolveError::Db(e)) => return tool_error(id, &format!("Database error: {e}")),
+            Err(e @ ResolveError::Unknown(_)) => return tool_error(id, &e.to_string()),
+        },
         _ => None,
     };
 
-    let existing = page::Entity::find()
-        .filter(page::Column::Path.eq(&args.path))
-        .one(&state.db)
-        .await;
+    let outcome = pages_repo::upsert_by_path(
+        &state.db,
+        user_id,
+        &args.path,
+        PageUpdate {
+            markdown: args.markdown,
+            summary: args.summary,
+            tag_ids,
+            private: args.private,
+        },
+    )
+    .await;
 
-    let existing = match existing {
-        Ok(e) => e,
-        Err(e) => return tool_error(id, &format!("Database error: {e}")),
-    };
-
-    let (action, old_markdown) = match existing {
-        Some(model) => {
-            let old_md = model.markdown.clone();
-            let page_id = model.id;
-            let mut active: page::ActiveModel = model.into();
-
-            if let Some(ref markdown) = args.markdown {
-                active.markdown = Set(markdown.clone());
-            }
-            if let Some(ref summary) = args.summary {
-                active.summary = Set(Some(summary.clone()).filter(|s| !s.is_empty()));
-            }
-            if let Some(ref ids) = tag_ids {
-                active.tag_ids = Set(ids.clone());
-            }
-            active.modified_at = Set(now);
-            active.modified_by = Set(user_id);
-
-            match active.update(&state.db).await {
-                Ok(_) => (("updated", page_id), Some(old_md)),
-                Err(e) => return tool_error(id, &format!("Update failed: {e}")),
-            }
-        }
-        None => {
-            let new_page = page::ActiveModel {
-                path: Set(args.path.clone()),
-                summary: Set(args.summary.clone().filter(|s| !s.is_empty())),
-                markdown: Set(args.markdown.clone().unwrap_or_default()),
-                tag_ids: Set(tag_ids.clone().unwrap_or_default()),
-                private: Set(true),
-                created_at: Set(now),
-                created_by: Set(user_id),
-                modified_at: Set(now),
-                modified_by: Set(user_id),
-                ..Default::default()
-            };
-
-            match new_page.insert(&state.db).await {
-                Ok(saved) => (("created", saved.id), None),
-                Err(e) => return tool_error(id, &format!("Create failed: {e}")),
-            }
-        }
-    };
-
-    let (status, page_id) = action;
-
-    if let Some(ref new_markdown) = args.markdown {
-        let old = old_markdown.as_deref().unwrap_or("");
-        revision::create_revision_if_changed(&state.db, page_id, old, new_markdown, user_id)
-            .await;
+    match outcome {
+        Ok(UpsertOutcome::Created(_)) => tool_result(id, format!("created: {}", args.path)),
+        Ok(UpsertOutcome::Updated(_)) => tool_result(id, format!("updated: {}", args.path)),
+        Err(e) => tool_error(id, &format!("Save failed: {e}")),
     }
-
-    tool_result(id, format!("{status}: {}", args.path))
 }
 
 async fn tool_search_pages(
@@ -471,73 +837,40 @@ async fn tool_search_pages(
     id: Option<Value>,
     arguments: Value,
 ) -> JsonRpcResponse {
-    let args: SearchPagesArgs = match serde_json::from_value(arguments) {
+    let args: SearchPagesArgs = match parse_args(id.clone(), arguments) {
         Ok(a) => a,
-        Err(e) => return tool_error(id, &format!("Invalid arguments: {e}")),
+        Err(r) => return r,
     };
-
-    // Build filter condition
-    let mut condition = Condition::all();
-
-    if let Some(prefix) = &args.prefix {
-        if !prefix.is_empty() {
-            condition = condition.add(page::Column::Path.starts_with(prefix));
-        }
-    }
-
-    if let Some(tag_name) = &args.tag {
-        if !tag_name.is_empty() {
-            let tag_model = tag::Entity::find()
-                .filter(tag::Column::Name.eq(tag_name.as_str()))
-                .one(&state.db)
-                .await;
-
-            match tag_model {
-                Ok(Some(t)) => {
-                    condition = condition.add(sea_orm::sea_query::Expr::cust_with_values(
-                        "? = ANY(tag_ids)",
-                        [t.id],
-                    ));
-                }
-                Ok(None) => {
-                    return tool_result(id, "No pages found.".into());
-                }
-                Err(e) => return tool_error(id, &format!("Database error: {e}")),
-            }
-        }
-    }
-
     let limit = args.limit.unwrap_or(20).min(100);
     let offset = args.offset.unwrap_or(0);
 
-    let total = match page::Entity::find()
-        .filter(condition.clone())
-        .count(&state.db)
-        .await
+    let result = match pages_repo::search(
+        &state.db,
+        args.prefix.as_deref(),
+        args.tag.as_deref(),
+        args.q.as_deref(),
+        true,
+        limit,
+        offset,
+    )
+    .await
     {
-        Ok(c) => c,
-        Err(e) => return tool_error(id, &format!("Database error: {e}")),
+        Ok(r) => r,
+        Err(pages_repo::SearchError::UnknownTag) => {
+            return tool_result(id, "No pages found.".into());
+        }
+        Err(pages_repo::SearchError::Db(e)) => {
+            return tool_error(id, &format!("Database error: {e}"));
+        }
     };
 
-    if total == 0 {
+    if result.total == 0 {
         return tool_result(id, "No pages found.".into());
     }
 
-    let pages: Vec<page::Model> = match page::Entity::find()
-        .filter(condition)
-        .order_by_desc(page::Column::ModifiedAt)
-        .offset(offset)
-        .limit(limit)
-        .all(&state.db)
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => return tool_error(id, &format!("Database error: {e}")),
-    };
-
-    let has_more = offset + limit < total;
-
-    let mut out = pages
+    let has_more = offset + limit < result.total;
+    let mut out = result
+        .pages
         .iter()
         .map(|p| match &p.summary {
             Some(s) if !s.is_empty() => format!("{}: {s}", p.path),
@@ -545,8 +878,7 @@ async fn tool_search_pages(
         })
         .collect::<Vec<_>>()
         .join("\n");
-
-    out.push_str(&format!("\n\n--- total: {total}, has_more: {has_more}"));
+    out.push_str(&format!("\n\n--- total: {}, has_more: {has_more}", result.total));
     if has_more {
         out.push_str(&format!(", next_offset: {}", offset + limit));
     }
@@ -555,20 +887,69 @@ async fn tool_search_pages(
     tool_result(id, out)
 }
 
-async fn tool_list_tags(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
-    let tags = tag::Entity::find()
-        .order_by_asc(tag::Column::Name)
-        .all(&state.db)
-        .await;
+async fn tool_list_page_paths(
+    state: &AppState,
+    id: Option<Value>,
+    arguments: Value,
+) -> JsonRpcResponse {
+    let args: ListPagePathsArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match pages_repo::list_paths(&state.db, args.prefix.as_deref(), args.limit).await {
+        Ok(paths) if paths.is_empty() => tool_result(id, "No pages.".into()),
+        Ok(paths) => tool_result(id, paths.join("\n")),
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
 
-    match tags {
+async fn tool_delete_page(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: DeletePageArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match pages_repo::delete_by_path(&state.db, &args.path).await {
+        Ok(true) => tool_result(id, format!("deleted: {}", args.path)),
+        Ok(false) => tool_error(id, &format!("Page not found: {}", args.path)),
+        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+    }
+}
+
+async fn tool_restore_page_revision(
+    state: &AppState,
+    user_id: i32,
+    id: Option<Value>,
+    arguments: Value,
+) -> JsonRpcResponse {
+    let args: RestorePageRevisionArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let pg = match pages_repo::find_by_path(&state.db, &args.path).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return tool_error(id, &format!("Page not found: {}", args.path)),
+        Err(e) => return tool_error(id, &format!("Database error: {e}")),
+    };
+    match pages_repo::restore_revision(&state.db, user_id, pg.id, args.revision_id).await {
+        Ok(_) => tool_result(
+            id,
+            format!("restored revision {} on page {}", args.revision_id, args.path),
+        ),
+        Err(e) => tool_error(id, &format!("Restore failed: {e}")),
+    }
+}
+
+// ============================== Tags ==============================
+
+async fn tool_list_tags(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    match tags_repo::list_all(&state.db).await {
         Ok(tags) if tags.is_empty() => tool_result(id, "No tags defined.".into()),
         Ok(tags) => {
             let out = tags
                 .iter()
                 .map(|t| match &t.description {
-                    Some(d) if !d.is_empty() => format!("{}: {d}", t.name),
-                    _ => t.name.clone(),
+                    Some(d) if !d.is_empty() => format!("[{}] {}: {d}", t.id, t.name),
+                    _ => format!("[{}] {}", t.id, t.name),
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -578,35 +959,508 @@ async fn tool_list_tags(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     }
 }
 
-async fn resolve_tag_ids(state: &AppState, names: &[String]) -> Result<Vec<i32>, String> {
-    let tags = tag::Entity::find()
-        .filter(tag::Column::Name.is_in(names.iter().map(|s| s.as_str())))
-        .all(&state.db)
-        .await
-        .map_err(|e| format!("Database error: {e}"))?;
-
-    let found: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
-    let missing: Vec<&String> = names.iter().filter(|n| !found.contains(n)).collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "Unknown tags: {}",
-            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-        ));
+async fn tool_read_tag(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: TagArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match tags_repo::find_by_name(&state.db, &args.name).await {
+        Ok(Some(t)) => json_result(id, json!({ "id": t.id, "name": t.name, "description": t.description })),
+        Ok(None) => tool_error(id, &format!("Tag not found: {}", args.name)),
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
     }
-
-    Ok(tags.iter().map(|t| t.id).collect())
 }
 
-async fn resolve_tag_names(state: &AppState, tag_ids: &[i32]) -> Vec<String> {
-    if tag_ids.is_empty() {
-        return vec![];
+async fn tool_create_tag(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: TagInputArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if args.name.is_empty() {
+        return tool_error(id, "name is required");
     }
-    tag::Entity::find()
-        .filter(tag::Column::Id.is_in(tag_ids.iter().copied()))
-        .all(&state.db)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| t.name)
-        .collect()
+    match tags_repo::create_tag(
+        &state.db,
+        RepoTagInput {
+            name: args.name,
+            description: args.description,
+        },
+    )
+    .await
+    {
+        Ok(t) => tool_result(id, format!("created tag [{}] {}", t.id, t.name)),
+        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+    }
+}
+
+async fn tool_update_tag(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: UpdateTagArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let name = args.name.clone();
+    match tags_repo::update_tag_by_name(
+        &state.db,
+        &name,
+        RepoTagUpdate {
+            new_name: args.new_name,
+            description: args.description,
+        },
+    )
+    .await
+    {
+        Ok(Some(t)) => tool_result(id, format!("updated tag [{}] {}", t.id, t.name)),
+        Ok(None) => tool_error(id, &format!("Tag not found: {name}")),
+        Err(e) => tool_error(id, &format!("Update failed: {e}")),
+    }
+}
+
+async fn tool_delete_tag(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: TagArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match tags_repo::delete_by_name(&state.db, &args.name).await {
+        Ok(true) => tool_result(id, format!("deleted tag {}", args.name)),
+        Ok(false) => tool_error(id, &format!("Tag not found: {}", args.name)),
+        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+    }
+}
+
+// ============================== Files ==============================
+
+async fn tool_list_files(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: ListFilesArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match files_repo::list_with_thumbnails(&state.db, args.mime_prefix.as_deref()).await {
+        Ok(rows) if rows.is_empty() => tool_result(id, "No files.".into()),
+        Ok(rows) => {
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|f| {
+                    format!(
+                        "[{}] {} ({}, {} bytes)",
+                        f.model.id, f.model.path, f.model.mimetype, f.model.size_bytes
+                    )
+                })
+                .collect();
+            tool_result(id, lines.join("\n"))
+        }
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_create_file(
+    state: &AppState,
+    user_id: i32,
+    id: Option<Value>,
+    arguments: Value,
+) -> JsonRpcResponse {
+    let args: CreateFileArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if args.path.trim().is_empty() {
+        return tool_error(id, "path is required");
+    }
+    let data = match (args.data_base64, args.data) {
+        (Some(b64), _) if !b64.is_empty() => {
+            match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                Ok(d) => d,
+                Err(e) => return tool_error(id, &format!("Invalid base64: {e}")),
+            }
+        }
+        (_, Some(text)) if !text.is_empty() => text.into_bytes(),
+        _ => return tool_error(id, "either data_base64 or data is required"),
+    };
+    if data.is_empty() {
+        return tool_error(id, "decoded data is empty");
+    }
+
+    let mimetype = args
+        .mimetype
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    match files_repo::create_file(
+        &state.db,
+        user_id,
+        NewFile {
+            path: args.path,
+            description: args.description,
+            mimetype,
+            data,
+        },
+    )
+    .await
+    {
+        Ok(created) => {
+            let title = files_repo::title_from_path(&created.model.path);
+            json_result(
+                id,
+                json!({
+                    "id": created.model.id,
+                    "path": created.model.path,
+                    "title": title,
+                    "mimetype": created.model.mimetype,
+                    "size_bytes": created.model.size_bytes,
+                    "has_thumbnail": created.has_thumbnail,
+                    "embed": format!("::img{{id={}}}", created.model.id),
+                }),
+            )
+        }
+        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+    }
+}
+
+async fn tool_read_file(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: FileIdArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match files_repo::find_with_thumbnail(&state.db, args.id).await {
+        Ok(Some(f)) => {
+            let title = files_repo::title_from_path(&f.model.path);
+            json_result(
+                id,
+                json!({
+                    "id": f.model.id,
+                    "path": f.model.path,
+                    "title": title,
+                    "description": f.model.description,
+                    "mimetype": f.model.mimetype,
+                    "size_bytes": f.model.size_bytes,
+                    "has_thumbnail": f.has_thumbnail,
+                    "created_at": f.model.created_at.to_string(),
+                }),
+            )
+        }
+        Ok(None) => tool_error(id, &format!("File not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_update_file(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: UpdateFileArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match files_repo::update_metadata(
+        &state.db,
+        args.id,
+        FileMetaUpdate {
+            path: args.path,
+            description: args.description,
+        },
+    )
+    .await
+    {
+        Ok(Some(f)) => tool_result(id, format!("updated file [{}] {}", f.model.id, f.model.path)),
+        Ok(None) => tool_error(id, &format!("File not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Update failed: {e}")),
+    }
+}
+
+async fn tool_delete_file(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: FileIdArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match files_repo::delete_by_id(&state.db, args.id).await {
+        Ok(true) => tool_result(id, format!("deleted file {}", args.id)),
+        Ok(false) => tool_error(id, &format!("File not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+    }
+}
+
+// ============================== Galleries ==============================
+
+async fn tool_list_galleries(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    match galleries_repo::list_all(&state.db).await {
+        Ok(rows) if rows.is_empty() => tool_result(id, "No galleries.".into()),
+        Ok(rows) => {
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|g| format!("[{}] {} ({} files)", g.id, g.title, g.file_ids.len()))
+                .collect();
+            tool_result(id, lines.join("\n"))
+        }
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_read_gallery(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: GalleryIdArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match galleries_repo::find_by_id(&state.db, args.id).await {
+        Ok(Some(g)) => json_result(
+            id,
+            json!({
+                "id": g.id,
+                "title": g.title,
+                "description": g.description,
+                "file_ids": g.file_ids,
+                "created_at": g.created_at.to_string(),
+            }),
+        ),
+        Ok(None) => tool_error(id, &format!("Gallery not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_create_gallery(
+    state: &AppState,
+    user_id: i32,
+    id: Option<Value>,
+    arguments: Value,
+) -> JsonRpcResponse {
+    let args: CreateGalleryArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if args.title.is_empty() {
+        return tool_error(id, "title is required");
+    }
+    if args.path.trim().is_empty() {
+        return tool_error(id, "path is required");
+    }
+    match galleries_repo::create_gallery(
+        &state.db,
+        user_id,
+        RepoGalleryInput {
+            path: args.path,
+            title: args.title,
+            description: args.description,
+            file_ids: args.file_ids,
+        },
+    )
+    .await
+    {
+        Ok(g) => tool_result(id, format!("created gallery [{}] {}", g.id, g.title)),
+        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+    }
+}
+
+async fn tool_update_gallery(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: UpdateGalleryArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let gallery_id = args.id;
+    if args.path.trim().is_empty() {
+        return tool_error(id, "path is required");
+    }
+    match galleries_repo::update_gallery(
+        &state.db,
+        gallery_id,
+        RepoGalleryInput {
+            path: args.path,
+            title: args.title,
+            description: args.description,
+            file_ids: args.file_ids,
+        },
+    )
+    .await
+    {
+        Ok(Some(g)) => tool_result(id, format!("updated gallery [{}] {}", g.id, g.title)),
+        Ok(None) => tool_error(id, &format!("Gallery not found: {gallery_id}")),
+        Err(e) => tool_error(id, &format!("Update failed: {e}")),
+    }
+}
+
+async fn tool_delete_gallery(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: GalleryIdArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match galleries_repo::delete_by_id(&state.db, args.id).await {
+        Ok(true) => tool_result(id, format!("deleted gallery {}", args.id)),
+        Ok(false) => tool_error(id, &format!("Gallery not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+    }
+}
+
+// ============================== Menu ==============================
+
+async fn tool_list_menu(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    match menu_repo::list_all(&state.db).await {
+        Ok(rows) if rows.is_empty() => tool_result(id, "No menu items.".into()),
+        Ok(rows) => {
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|m| {
+                    format!(
+                        "[{}] order={} {} -> /{} {}",
+                        m.id,
+                        m.order_index,
+                        m.title,
+                        m.path,
+                        if m.private { "(private)" } else { "" }
+                    )
+                })
+                .collect();
+            tool_result(id, lines.join("\n"))
+        }
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_read_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: MenuIdArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match menu_repo::find_by_id(&state.db, args.id).await {
+        Ok(Some(m)) => json_result(
+            id,
+            json!({
+                "id": m.id,
+                "title": m.title,
+                "path": m.path,
+                "markdown": m.markdown,
+                "order_index": m.order_index,
+                "private": m.private,
+            }),
+        ),
+        Ok(None) => tool_error(id, &format!("Menu item not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_create_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: CreateMenuArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match menu_repo::create(
+        &state.db,
+        RepoMenuInput {
+            title: args.title,
+            path: args.path,
+            markdown: args.markdown.unwrap_or_default(),
+            order_index: args.order_index,
+            private: args.private,
+        },
+    )
+    .await
+    {
+        Ok(m) => tool_result(id, format!("created menu item [{}] {}", m.id, m.title)),
+        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+    }
+}
+
+async fn tool_update_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: UpdateMenuArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let menu_id = args.id;
+    match menu_repo::update(
+        &state.db,
+        menu_id,
+        RepoMenuInput {
+            title: args.title,
+            path: args.path,
+            markdown: args.markdown.unwrap_or_default(),
+            order_index: args.order_index,
+            private: args.private,
+        },
+    )
+    .await
+    {
+        Ok(Some(m)) => tool_result(id, format!("updated menu item [{}] {}", m.id, m.title)),
+        Ok(None) => tool_error(id, &format!("Menu item not found: {menu_id}")),
+        Err(e) => tool_error(id, &format!("Update failed: {e}")),
+    }
+}
+
+async fn tool_delete_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
+    let args: MenuIdArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match menu_repo::delete_by_id(&state.db, args.id).await {
+        Ok(true) => tool_result(id, format!("deleted menu item {}", args.id)),
+        Ok(false) => tool_error(id, &format!("Menu item not found: {}", args.id)),
+        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+    }
+}
+
+// ============================== Tokens ==============================
+
+async fn tool_list_tokens(state: &AppState, user_id: i32, id: Option<Value>) -> JsonRpcResponse {
+    match tokens_repo::list_service_tokens(&state.db, user_id).await {
+        Ok(rows) if rows.is_empty() => tool_result(id, "No service tokens.".into()),
+        Ok(rows) => {
+            let lines: Vec<String> = rows
+                .iter()
+                .map(|t| {
+                    format!(
+                        "[{}] {} expires={}",
+                        t.id,
+                        t.label.as_deref().unwrap_or("(unlabeled)"),
+                        t.expires_at
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "never".into())
+                    )
+                })
+                .collect();
+            tool_result(id, lines.join("\n"))
+        }
+        Err(e) => tool_error(id, &format!("Database error: {e}")),
+    }
+}
+
+async fn tool_create_token(
+    state: &AppState,
+    user_id: i32,
+    id: Option<Value>,
+    arguments: Value,
+) -> JsonRpcResponse {
+    let args: CreateTokenArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match tokens_repo::create_service_token(
+        &state.db,
+        auth::generate_token,
+        ServiceTokenInput {
+            user_id,
+            label: args.label,
+        },
+    )
+    .await
+    {
+        Ok(created) => json_result(
+            id,
+            json!({
+                "id": created.model.id,
+                "label": created.model.label,
+                "nonce": created.nonce,
+                "note": "Store the nonce now — it is not retrievable later."
+            }),
+        ),
+        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+    }
+}
+
+async fn tool_delete_token(
+    state: &AppState,
+    user_id: i32,
+    id: Option<Value>,
+    arguments: Value,
+) -> JsonRpcResponse {
+    let args: DeleteTokenArgs = match parse_args(id.clone(), arguments) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match tokens_repo::delete_service_token(&state.db, user_id, args.id).await {
+        Ok(()) => tool_result(id, format!("deleted token {}", args.id)),
+        Err(TokenDeleteError::NotFound) => tool_error(id, "Token not found"),
+        Err(TokenDeleteError::Db(e)) => tool_error(id, &format!("Delete failed: {e}")),
+    }
 }

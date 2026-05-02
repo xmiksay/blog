@@ -8,7 +8,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U blog -d blog"]
       interval: 5s
@@ -16,10 +16,11 @@ services:
       retries: 5
 
   app:
+    profiles: ["full"]
     build: .
     environment:
       DATABASE_URL: postgres://blog:blog@db:5432/blog
-      RUST_LOG: blog=debug,tower_http=debug,info
+      RUST_LOG: site=debug,tower_http=debug,info
     ports:
       - "3000:3000"
     depends_on:

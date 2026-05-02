@@ -1,6 +1,6 @@
-# Personal Blog
+# Personal Site
 
-Rust/Axum server-rendered personal blog with admin CMS for managing pages, images, galleries, and navigation.
+Rust/Axum server-rendered personal site with admin CMS for managing pages, images, galleries, and navigation.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ The app will be available at `http://localhost:3000`.
 With Docker Compose running:
 
 ```bash
-docker compose exec app ./blog_cli create-user <username> <password>
+docker compose exec app ./site_cli create-user <username> <password>
 ```
 
 ### Without Docker
@@ -37,7 +37,7 @@ docker compose exec app ./blog_cli create-user <username> <password>
 Set `DATABASE_URL` in `.env` or environment, then:
 
 ```bash
-cargo run --bin blog_cli -- create-user <username> <password>
+cargo run --bin site_cli -- create-user <username> <password>
 ```
 
 ## Database Migrations
@@ -46,22 +46,22 @@ Migrations run automatically on server startup. To manage them manually:
 
 ```bash
 # Apply all pending migrations
-cargo run --bin blog_migration
+cargo run --bin site_migration
 
 # Rollback last migration
-cargo run --bin blog_migration -- down
+cargo run --bin site_migration -- down
 
 # Reset and reapply all
-cargo run --bin blog_migration -- fresh
+cargo run --bin site_migration -- fresh
 
 # Show migration status
-cargo run --bin blog_migration -- status
+cargo run --bin site_migration -- status
 ```
 
 With Docker Compose:
 
 ```bash
-docker compose exec app ./blog_migration
+docker compose exec app ./site_migration
 ```
 
 ## Environment Variables
@@ -69,13 +69,13 @@ docker compose exec app ./blog_migration
 | Variable | Description | Default |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://blog:blog@localhost:5432/blog` |
-| `RUST_LOG` | Log level filter | `blog=debug,tower_http=debug,info` |
+| `RUST_LOG` | Log level filter | `site=debug,tower_http=debug,info` |
 
 ## Development
 
 ```bash
 # Run locally (requires DATABASE_URL)
-cargo run --bin blog_server
+cargo run --bin site_server
 
 # Check compilation
 cargo check

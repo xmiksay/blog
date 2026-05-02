@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{% if tag %}{{ tag.name }} – {% elif q %}{{ q }} – {% endif %}Pages – Site{% endblock %}
+{% block content %}
+<div class="page-search">
+    {% if tag %}
+    <h1>{{ tag.name }}</h1>
+    {% if tag.description %}<p class="meta">{{ tag.description }}</p>{% endif %}
+    {% else %}
+    <h1>Pages</h1>
+    {% endif %}
+
+    <form class="search-form" method="get" action="/search">
+        <input type="search" name="q" value="{{ q }}" placeholder="Search pages…" />
+        <input type="text" name="path" value="{{ path_prefix }}" placeholder="Path prefix" />
+        <input type="text" name="tag" value="{{ tag_name }}" placeholder="Tag" />
+        <input type="hidden" name="limit" value="{{ limit }}" />
+        <button type="submit">Search</button>
+    </form>
+
+    {% if pages | length == 0 %}
+    <p>No pages found.</p>
+    {% else %}
+    <ul class="page-list">
+        {% for p in pages %}
+        <li>
+            <a href="/{{ p.path }}">{{ p.path }}</a>
+            {% if p.summary %}<span class="summary">{{ p.summary }}</span>{% endif %}
+            <span class="meta">{{ p.modified_at|timeformat("%d. %m. %Y") }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if total > limit %}
+    <nav class="pagination">
+        {% set qs = "" %}
+        {% if q %}{% set qs = qs ~ "&q=" ~ q %}{% endif %}
+        {% if tag_name %}{% set qs = qs ~ "&tag=" ~ tag_name %}{% endif %}
+        {% if path_prefix %}{% set qs = qs ~ "&path=" ~ path_prefix %}{% endif %}
+        {% if prev_offset is not none %}
+        <a href="/search?limit={{ limit }}&offset={{ prev_offset }}{{ qs }}">&laquo; Prev</a>
+        {% endif %}
+        <span class="meta">{{ offset + 1 }}–{{ [offset + limit, total] | min }} of {{ total }}</span>
+        {% if next_offset is not none %}
+        <a href="/search?limit={{ limit }}&offset={{ next_offset }}{{ qs }}">Next &raquo;</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+</div>
+{% endblock %}

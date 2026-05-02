@@ -1,0 +1,17 @@
+use sea_orm::entity::prelude::*;
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, serde::Serialize)]
+#[sea_orm(table_name = "file_blobs")]
+pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub hash: String,
+    #[serde(skip)]
+    pub data: Vec<u8>,
+    pub size_bytes: i64,
+    pub created_at: DateTimeWithTimeZone,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+impl ActiveModelBehavior for ActiveModel {}

@@ -164,7 +164,7 @@ button {{ padding: 10px 20px; cursor: pointer; }}
 </style></head>
 <body>
 <h2>Authorize access</h2>
-<p class="client"><strong>{}</strong> wants to access your blog.</p>
+<p class="client"><strong>{}</strong> wants to access your site.</p>
 <form method="post">
 <input type="hidden" name="client_id" value="{}">
 <input type="hidden" name="redirect_uri" value="{}">

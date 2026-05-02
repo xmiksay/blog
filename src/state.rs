@@ -3,10 +3,22 @@ use minijinja::value::Value;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 
+use crate::ai::{
+    AiConfig, llm::registry::ProviderRegistry, local_tools, mcp_client::UserMcpManager,
+    tool_registry::ToolRegistry,
+};
+use crate::assets;
+use crate::config::Config;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: DatabaseConnection,
     pub tmpl: Arc<Environment<'static>>,
+    pub namespace: Arc<String>,
+    pub ai_config: Arc<AiConfig>,
+    pub provider_registry: Arc<ProviderRegistry>,
+    pub tool_registry: Arc<ToolRegistry>,
+    pub mcp_manager: Arc<UserMcpManager>,
 }
 
 fn timeformat(value: Value, format: Option<String>) -> Result<String, minijinja::Error> {
@@ -24,20 +36,39 @@ fn timeformat(value: Value, format: Option<String>) -> Result<String, minijinja:
     Ok(s)
 }
 
-pub async fn create_state() -> AppState {
-    dotenvy::dotenv().ok();
-
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let db = sea_orm::Database::connect(&database_url)
+pub async fn create_state(config: &Config) -> AppState {
+    let db = sea_orm::Database::connect(&config.database_url)
         .await
         .expect("Failed to connect to database");
 
     let mut env = Environment::new();
-    env.set_loader(minijinja::path_loader("templates"));
+    let ns = config.namespace.clone();
+    env.set_loader(move |name| {
+        match assets::load(&ns, &format!("templates/{name}")) {
+            Some(file) => match String::from_utf8(file.data.to_vec()) {
+                Ok(src) => Ok(Some(src)),
+                Err(e) => Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("template '{name}' is not valid UTF-8: {e}"),
+                )),
+            },
+            None => Ok(None),
+        }
+    });
     env.add_filter("timeformat", timeformat);
+
+    let ai_config = Arc::new(AiConfig::new());
+    let provider_registry = Arc::new(ProviderRegistry::new(db.clone()));
+    let tool_registry = Arc::new(ToolRegistry::new(local_tools::default_tools()));
+    let mcp_manager = Arc::new(UserMcpManager::new(db.clone()));
 
     AppState {
         db,
         tmpl: Arc::new(env),
+        namespace: Arc::new(config.namespace.clone()),
+        ai_config,
+        provider_registry,
+        tool_registry,
+        mcp_manager,
     }
 }
