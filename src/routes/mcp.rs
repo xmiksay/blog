@@ -8,14 +8,11 @@ use serde_json::{Value, json};
 
 use base64::Engine;
 
-use crate::auth;
 use crate::repo::{
     files::{self as files_repo, FileMetaUpdate, NewFile},
     galleries::{self as galleries_repo, GalleryInput as RepoGalleryInput},
-    menu::{self as menu_repo, MenuInput as RepoMenuInput},
     pages::{self as pages_repo, PageUpdate, UpsertOutcome},
     tags::{self as tags_repo, ResolveError, TagInput as RepoTagInput, TagUpdate as RepoTagUpdate},
-    tokens::{self as tokens_repo, DeleteError as TokenDeleteError, ServiceTokenInput},
 };
 use crate::routes::oauth;
 use crate::state::AppState;
@@ -113,22 +110,8 @@ struct SearchPagesArgs {
 }
 
 #[derive(Deserialize)]
-struct ListPagePathsArgs {
-    #[serde(default)]
-    prefix: Option<String>,
-    #[serde(default)]
-    limit: Option<u64>,
-}
-
-#[derive(Deserialize)]
 struct DeletePageArgs {
     path: String,
-}
-
-#[derive(Deserialize)]
-struct RestorePageRevisionArgs {
-    path: String,
-    revision_id: i32,
 }
 
 #[derive(Deserialize)]
@@ -208,45 +191,6 @@ struct UpdateGalleryArgs {
     description: Option<String>,
     #[serde(default)]
     file_ids: Vec<i32>,
-}
-
-#[derive(Deserialize)]
-struct MenuIdArgs {
-    id: i32,
-}
-
-#[derive(Deserialize)]
-struct CreateMenuArgs {
-    title: String,
-    path: String,
-    #[serde(default)]
-    markdown: Option<String>,
-    order_index: i32,
-    #[serde(default)]
-    private: bool,
-}
-
-#[derive(Deserialize)]
-struct UpdateMenuArgs {
-    id: i32,
-    title: String,
-    path: String,
-    #[serde(default)]
-    markdown: Option<String>,
-    order_index: i32,
-    #[serde(default)]
-    private: bool,
-}
-
-#[derive(Deserialize)]
-struct CreateTokenArgs {
-    #[serde(default)]
-    label: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct DeleteTokenArgs {
-    id: i32,
 }
 
 // --- MCP endpoint ---
@@ -377,35 +321,12 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                     }
                 },
                 {
-                    "name": "list_page_paths",
-                    "description": "Return only the path strings of pages, sorted ascending. Lightweight — useful for path autocomplete and discovery.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "prefix": { "type": "string", "description": "Optional path prefix filter (case-insensitive)" },
-                            "limit": { "type": "integer", "description": "Max paths to return" }
-                        }
-                    }
-                },
-                {
                     "name": "delete_page",
                     "description": "Delete a page by its path.",
                     "inputSchema": {
                         "type": "object",
                         "properties": { "path": { "type": "string" } },
                         "required": ["path"]
-                    }
-                },
-                {
-                    "name": "restore_page_revision",
-                    "description": "Restore a page to the markdown content of a prior revision (looked up by revision_id).",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string" },
-                            "revision_id": { "type": "integer" }
-                        },
-                        "required": ["path", "revision_id"]
                     }
                 },
 
@@ -569,86 +490,6 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                         "properties": { "id": { "type": "integer" } },
                         "required": ["id"]
                     }
-                },
-
-                // ----- Menu -----
-                {
-                    "name": "list_menu",
-                    "description": "List all menu items in display order.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "read_menu_item",
-                    "description": "Read a menu item by ID.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "id": { "type": "integer" } },
-                        "required": ["id"]
-                    }
-                },
-                {
-                    "name": "create_menu_item",
-                    "description": "Create a menu item.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "title": { "type": "string" },
-                            "path": { "type": "string" },
-                            "markdown": { "type": "string" },
-                            "order_index": { "type": "integer" },
-                            "private": { "type": "boolean" }
-                        },
-                        "required": ["title", "path", "order_index"]
-                    }
-                },
-                {
-                    "name": "update_menu_item",
-                    "description": "Update a menu item (replaces all fields).",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "integer" },
-                            "title": { "type": "string" },
-                            "path": { "type": "string" },
-                            "markdown": { "type": "string" },
-                            "order_index": { "type": "integer" },
-                            "private": { "type": "boolean" }
-                        },
-                        "required": ["id", "title", "path", "order_index"]
-                    }
-                },
-                {
-                    "name": "delete_menu_item",
-                    "description": "Delete a menu item by ID.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "id": { "type": "integer" } },
-                        "required": ["id"]
-                    }
-                },
-
-                // ----- Tokens (service tokens, owned by caller) -----
-                {
-                    "name": "list_tokens",
-                    "description": "List the caller's service tokens.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                },
-                {
-                    "name": "create_token",
-                    "description": "Create a new service token. The nonce is returned ONCE — store it securely.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "label": { "type": "string" } }
-                    }
-                },
-                {
-                    "name": "delete_token",
-                    "description": "Revoke a service token by ID.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": { "id": { "type": "integer" } },
-                        "required": ["id"]
-                    }
                 }
             ]
         }),
@@ -674,9 +515,7 @@ async fn handle_tools_call(
         "read_page" => tool_read_page(state, id, arguments).await,
         "edit_page" => tool_edit_page(state, user_id, id, arguments).await,
         "search_pages" => tool_search_pages(state, id, arguments).await,
-        "list_page_paths" => tool_list_page_paths(state, id, arguments).await,
         "delete_page" => tool_delete_page(state, id, arguments).await,
-        "restore_page_revision" => tool_restore_page_revision(state, user_id, id, arguments).await,
 
         // tags
         "list_tags" => tool_list_tags(state, id).await,
@@ -698,18 +537,6 @@ async fn handle_tools_call(
         "create_gallery" => tool_create_gallery(state, user_id, id, arguments).await,
         "update_gallery" => tool_update_gallery(state, id, arguments).await,
         "delete_gallery" => tool_delete_gallery(state, id, arguments).await,
-
-        // menu
-        "list_menu" => tool_list_menu(state, id).await,
-        "read_menu_item" => tool_read_menu(state, id, arguments).await,
-        "create_menu_item" => tool_create_menu(state, id, arguments).await,
-        "update_menu_item" => tool_update_menu(state, id, arguments).await,
-        "delete_menu_item" => tool_delete_menu(state, id, arguments).await,
-
-        // tokens
-        "list_tokens" => tool_list_tokens(state, user_id, id).await,
-        "create_token" => tool_create_token(state, user_id, id, arguments).await,
-        "delete_token" => tool_delete_token(state, user_id, id, arguments).await,
 
         _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
     }
@@ -887,22 +714,6 @@ async fn tool_search_pages(
     tool_result(id, out)
 }
 
-async fn tool_list_page_paths(
-    state: &AppState,
-    id: Option<Value>,
-    arguments: Value,
-) -> JsonRpcResponse {
-    let args: ListPagePathsArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    match pages_repo::list_paths(&state.db, args.prefix.as_deref(), args.limit).await {
-        Ok(paths) if paths.is_empty() => tool_result(id, "No pages.".into()),
-        Ok(paths) => tool_result(id, paths.join("\n")),
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
-    }
-}
-
 async fn tool_delete_page(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
     let args: DeletePageArgs = match parse_args(id.clone(), arguments) {
         Ok(a) => a,
@@ -912,30 +723,6 @@ async fn tool_delete_page(state: &AppState, id: Option<Value>, arguments: Value)
         Ok(true) => tool_result(id, format!("deleted: {}", args.path)),
         Ok(false) => tool_error(id, &format!("Page not found: {}", args.path)),
         Err(e) => tool_error(id, &format!("Delete failed: {e}")),
-    }
-}
-
-async fn tool_restore_page_revision(
-    state: &AppState,
-    user_id: i32,
-    id: Option<Value>,
-    arguments: Value,
-) -> JsonRpcResponse {
-    let args: RestorePageRevisionArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    let pg = match pages_repo::find_by_path(&state.db, &args.path).await {
-        Ok(Some(p)) => p,
-        Ok(None) => return tool_error(id, &format!("Page not found: {}", args.path)),
-        Err(e) => return tool_error(id, &format!("Database error: {e}")),
-    };
-    match pages_repo::restore_revision(&state.db, user_id, pg.id, args.revision_id).await {
-        Ok(_) => tool_result(
-            id,
-            format!("restored revision {} on page {}", args.revision_id, args.path),
-        ),
-        Err(e) => tool_error(id, &format!("Restore failed: {e}")),
     }
 }
 
@@ -1284,183 +1071,3 @@ async fn tool_delete_gallery(state: &AppState, id: Option<Value>, arguments: Val
     }
 }
 
-// ============================== Menu ==============================
-
-async fn tool_list_menu(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
-    match menu_repo::list_all(&state.db).await {
-        Ok(rows) if rows.is_empty() => tool_result(id, "No menu items.".into()),
-        Ok(rows) => {
-            let lines: Vec<String> = rows
-                .iter()
-                .map(|m| {
-                    format!(
-                        "[{}] order={} {} -> /{} {}",
-                        m.id,
-                        m.order_index,
-                        m.title,
-                        m.path,
-                        if m.private { "(private)" } else { "" }
-                    )
-                })
-                .collect();
-            tool_result(id, lines.join("\n"))
-        }
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
-    }
-}
-
-async fn tool_read_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
-    let args: MenuIdArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    match menu_repo::find_by_id(&state.db, args.id).await {
-        Ok(Some(m)) => json_result(
-            id,
-            json!({
-                "id": m.id,
-                "title": m.title,
-                "path": m.path,
-                "markdown": m.markdown,
-                "order_index": m.order_index,
-                "private": m.private,
-            }),
-        ),
-        Ok(None) => tool_error(id, &format!("Menu item not found: {}", args.id)),
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
-    }
-}
-
-async fn tool_create_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
-    let args: CreateMenuArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    match menu_repo::create(
-        &state.db,
-        RepoMenuInput {
-            title: args.title,
-            path: args.path,
-            markdown: args.markdown.unwrap_or_default(),
-            order_index: args.order_index,
-            private: args.private,
-        },
-    )
-    .await
-    {
-        Ok(m) => tool_result(id, format!("created menu item [{}] {}", m.id, m.title)),
-        Err(e) => tool_error(id, &format!("Create failed: {e}")),
-    }
-}
-
-async fn tool_update_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
-    let args: UpdateMenuArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    let menu_id = args.id;
-    match menu_repo::update(
-        &state.db,
-        menu_id,
-        RepoMenuInput {
-            title: args.title,
-            path: args.path,
-            markdown: args.markdown.unwrap_or_default(),
-            order_index: args.order_index,
-            private: args.private,
-        },
-    )
-    .await
-    {
-        Ok(Some(m)) => tool_result(id, format!("updated menu item [{}] {}", m.id, m.title)),
-        Ok(None) => tool_error(id, &format!("Menu item not found: {menu_id}")),
-        Err(e) => tool_error(id, &format!("Update failed: {e}")),
-    }
-}
-
-async fn tool_delete_menu(state: &AppState, id: Option<Value>, arguments: Value) -> JsonRpcResponse {
-    let args: MenuIdArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    match menu_repo::delete_by_id(&state.db, args.id).await {
-        Ok(true) => tool_result(id, format!("deleted menu item {}", args.id)),
-        Ok(false) => tool_error(id, &format!("Menu item not found: {}", args.id)),
-        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
-    }
-}
-
-// ============================== Tokens ==============================
-
-async fn tool_list_tokens(state: &AppState, user_id: i32, id: Option<Value>) -> JsonRpcResponse {
-    match tokens_repo::list_service_tokens(&state.db, user_id).await {
-        Ok(rows) if rows.is_empty() => tool_result(id, "No service tokens.".into()),
-        Ok(rows) => {
-            let lines: Vec<String> = rows
-                .iter()
-                .map(|t| {
-                    format!(
-                        "[{}] {} expires={}",
-                        t.id,
-                        t.label.as_deref().unwrap_or("(unlabeled)"),
-                        t.expires_at
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| "never".into())
-                    )
-                })
-                .collect();
-            tool_result(id, lines.join("\n"))
-        }
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
-    }
-}
-
-async fn tool_create_token(
-    state: &AppState,
-    user_id: i32,
-    id: Option<Value>,
-    arguments: Value,
-) -> JsonRpcResponse {
-    let args: CreateTokenArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    match tokens_repo::create_service_token(
-        &state.db,
-        auth::generate_token,
-        ServiceTokenInput {
-            user_id,
-            label: args.label,
-        },
-    )
-    .await
-    {
-        Ok(created) => json_result(
-            id,
-            json!({
-                "id": created.model.id,
-                "label": created.model.label,
-                "nonce": created.nonce,
-                "note": "Store the nonce now — it is not retrievable later."
-            }),
-        ),
-        Err(e) => tool_error(id, &format!("Create failed: {e}")),
-    }
-}
-
-async fn tool_delete_token(
-    state: &AppState,
-    user_id: i32,
-    id: Option<Value>,
-    arguments: Value,
-) -> JsonRpcResponse {
-    let args: DeleteTokenArgs = match parse_args(id.clone(), arguments) {
-        Ok(a) => a,
-        Err(r) => return r,
-    };
-    match tokens_repo::delete_service_token(&state.db, user_id, args.id).await {
-        Ok(()) => tool_result(id, format!("deleted token {}", args.id)),
-        Err(TokenDeleteError::NotFound) => tool_error(id, "Token not found"),
-        Err(TokenDeleteError::Db(e)) => tool_error(id, &format!("Delete failed: {e}")),
-    }
-}

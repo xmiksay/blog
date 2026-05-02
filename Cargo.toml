@@ -47,3 +47,4 @@ dashmap       = "6"
 thiserror     = "2"
 anyhow        = "1"
 uuid          = { version = "1.23.1", features = ["v4", "serde"] }
+htmd          = "0.5.4"

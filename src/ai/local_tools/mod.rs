@@ -4,6 +4,8 @@
 //! the site's own MCP endpoint.
 
 pub mod site_tools;
+pub mod web_fetch;
+pub mod web_search;
 
 use std::sync::Arc;
 
@@ -31,6 +33,9 @@ pub trait LocalTool: Send + Sync {
     ) -> Result<Value, ToolDispatchError>;
 }
 
-pub fn default_tools() -> Vec<Arc<dyn LocalTool>> {
-    site_tools::tools()
+pub fn default_tools(serper_api_key: Option<String>) -> Vec<Arc<dyn LocalTool>> {
+    let mut tools = site_tools::tools();
+    tools.push(Arc::new(web_search::WebSearch::new(serper_api_key)));
+    tools.push(Arc::new(web_fetch::WebFetch));
+    tools
 }

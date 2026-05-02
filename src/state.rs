@@ -59,7 +59,9 @@ pub async fn create_state(config: &Config) -> AppState {
 
     let ai_config = Arc::new(AiConfig::new());
     let provider_registry = Arc::new(ProviderRegistry::new(db.clone()));
-    let tool_registry = Arc::new(ToolRegistry::new(local_tools::default_tools()));
+    let tool_registry = Arc::new(ToolRegistry::new(local_tools::default_tools(
+        config.serper_api_key.clone(),
+    )));
     let mcp_manager = Arc::new(UserMcpManager::new(db.clone()));
 
     AppState {
