@@ -2,11 +2,14 @@
 import { onMounted } from 'vue'
 import { useFilesStore } from '../stores/files'
 
-defineProps<{ excludeIds: number[] }>()
+const props = withDefaults(
+  defineProps<{ excludeIds: number[]; mimePrefix?: string }>(),
+  { mimePrefix: undefined },
+)
 const emit = defineEmits<{ pick: [id: number]; close: [] }>()
 
 const files = useFilesStore()
-onMounted(() => files.load())
+onMounted(() => files.load(props.mimePrefix))
 </script>
 
 <template>

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { marked } from 'marked'
 import { usePagesStore } from '../stores/pages'
 import { useTagsStore } from '../stores/tags'
 import PathPicker from '../components/PathPicker.vue'
+import MarkdownEditor from '../components/MarkdownEditor.vue'
 import type { PageInput } from '../types'
 
 const props = defineProps<{ id?: string; create?: boolean }>()
@@ -18,7 +18,6 @@ const summary = ref<string>('')
 const markdown = ref('')
 const tagIds = ref<number[]>([])
 const isPrivate = ref(false)
-const showPreview = ref(false)
 const error = ref('')
 const revisions = ref<Array<{ id: number; created_at: string }>>([])
 
@@ -134,37 +133,7 @@ async function restore(revId: number) {
         <input v-model="isPrivate" type="checkbox" />
         Private
       </label>
-      <div class="border border-gray-200 rounded">
-        <div class="flex border-b border-gray-200 bg-gray-50 text-sm">
-          <button
-            type="button"
-            class="px-3 py-1.5"
-            :class="!showPreview ? 'bg-white font-medium' : 'text-gray-500'"
-            @click="showPreview = false"
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            class="px-3 py-1.5"
-            :class="showPreview ? 'bg-white font-medium' : 'text-gray-500'"
-            @click="showPreview = true"
-          >
-            Preview
-          </button>
-        </div>
-        <textarea
-          v-if="!showPreview"
-          v-model="markdown"
-          rows="24"
-          class="block w-full p-3 font-mono text-sm focus:outline-none"
-        ></textarea>
-        <div
-          v-else
-          class="p-4 prose max-w-none"
-          v-html="marked.parse(markdown)"
-        ></div>
-      </div>
+      <MarkdownEditor v-model="markdown" :rows="24" />
     </div>
 
     <div v-if="!props.create && revisions.length" class="bg-white rounded-lg shadow p-4">

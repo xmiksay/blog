@@ -2,6 +2,7 @@ pub mod auth;
 pub mod error;
 pub mod files;
 pub mod galleries;
+pub mod markdown;
 pub mod menu;
 pub mod pages;
 pub mod paths;
@@ -19,6 +20,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .nest("/tags", tags::router())
         .nest("/files", files::router())
         .nest("/galleries", galleries::router())
+        .nest("/markdown", markdown::router())
         .nest("/menu", menu::router())
         .nest("/paths", paths::router())
         .nest("/tokens", tokens::router())

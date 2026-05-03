@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useMenuStore } from '../stores/menu'
 import PathPicker from '../components/PathPicker.vue'
+import MarkdownEditor from '../components/MarkdownEditor.vue'
 import type { MenuItem } from '../types'
 
 const props = defineProps<{ id?: string }>()
@@ -125,11 +126,7 @@ async function remove(item: MenuItem) {
       </div>
       <label class="block">
         <span class="text-sm text-gray-600">Markdown</span>
-        <textarea
-          v-model="draft.markdown"
-          rows="6"
-          class="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 font-mono text-sm"
-        ></textarea>
+        <MarkdownEditor v-model="draft.markdown" :rows="6" class="mt-1" />
       </label>
       <div class="space-x-2 text-sm">
         <button class="text-gray-600 hover:underline" @click="editing = null">Cancel</button>
