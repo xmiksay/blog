@@ -8,6 +8,7 @@ pub mod pages;
 pub mod paths;
 pub mod tags;
 pub mod tokens;
+pub mod users;
 
 use axum::Router;
 use axum::middleware::from_fn_with_state;
@@ -24,6 +25,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .nest("/menu", menu::router())
         .nest("/paths", paths::router())
         .nest("/tokens", tokens::router())
+        .nest("/users", users::router())
         .nest("/assistant", crate::ai::handlers::router())
         .route_layer(from_fn_with_state(state, crate::auth::require_login_api));
 

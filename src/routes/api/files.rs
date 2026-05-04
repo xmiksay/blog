@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
 #[derive(serde::Serialize)]
 pub struct FileSummary {
     pub id: i32,
+    pub hash: String,
     pub path: String,
     pub title: String,
     pub description: Option<String>,
@@ -33,6 +34,7 @@ impl From<FileWithThumb> for FileSummary {
     fn from(f: FileWithThumb) -> Self {
         Self {
             id: f.model.id,
+            hash: f.model.hash,
             title: files_repo::title_from_path(&f.model.path),
             path: f.model.path,
             description: f.model.description,
@@ -144,6 +146,7 @@ pub async fn upload(
         StatusCode::CREATED,
         Json(FileSummary {
             id: m.id,
+            hash: m.hash,
             title: files_repo::title_from_path(&m.path),
             path: m.path,
             description: m.description,

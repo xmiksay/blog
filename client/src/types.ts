@@ -29,6 +29,7 @@ export interface Tag {
 
 export interface FileSummary {
   id: number
+  hash: string
   path: string
   title: string
   description: string | null
@@ -66,6 +67,12 @@ export interface TokenSummary {
 
 export interface TokenCreated extends TokenSummary {
   nonce: string
+}
+
+export interface UserSummary {
+  id: number
+  username: string
+  is_self: boolean
 }
 
 // Assistant

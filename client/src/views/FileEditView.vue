@@ -48,7 +48,7 @@ async function save() {
       <div class="flex justify-center bg-gray-100 rounded p-2">
         <img
           v-if="meta.has_thumbnail"
-          :src="`/obrazky/${meta.id}/nahled`"
+          :src="`/files/${meta.hash}/nahled`"
           :alt="meta.title"
           class="max-h-48"
         />

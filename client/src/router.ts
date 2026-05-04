@@ -9,6 +9,7 @@ import GalleriesView from './views/GalleriesView.vue'
 import GalleryEditView from './views/GalleryEditView.vue'
 import MenuView from './views/MenuView.vue'
 import TokensView from './views/TokensView.vue'
+import UsersView from './views/UsersView.vue'
 import AssistantView from './views/AssistantView.vue'
 import McpServersView from './views/McpServersView.vue'
 import ProvidersView from './views/ProvidersView.vue'
@@ -31,6 +32,7 @@ const routes = [
   { path: '/menu', component: MenuView },
   { path: '/menu/:id/edit', component: MenuView, props: true },
   { path: '/tokens', component: TokensView },
+  { path: '/users', component: UsersView },
   { path: '/assistant', component: AssistantView },
   { path: '/mcp-servers', component: McpServersView },
   { path: '/providers', component: ProvidersView },

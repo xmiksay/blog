@@ -1,43 +1,55 @@
 # Personal Site
 
-Rust/Axum server-rendered personal site with admin CMS for managing pages, images, galleries, and navigation.
+Rust/Axum personal site. Server-rendered public pages plus a Vue 3 admin SPA. Includes a JSON API, OAuth2 (PKCE, RFC 7591), an MCP server for Claude integration, and a built-in AI assistant subsystem.
 
 ## Requirements
 
 - Rust (edition 2024)
+- Node.js (for building the Vue admin client)
 - PostgreSQL
 - Docker & Docker Compose (for containerized setup)
 
 ## Quick Start with Docker Compose
 
-1. Build the release binaries:
+`docker-compose.yml` defines two services: `db` (Postgres 17, exposed on host port `5434`) and `app` (multi-stage build: Node → Rust → debian-slim). The `app` service is gated behind the `full` profile.
 
 ```bash
-cargo build --release
+# Database only
+docker compose up -d db
+
+# Database + app
+docker compose --profile full up -d --build
 ```
 
-2. Start the application:
+The app is available at `http://localhost:3000`.
+
+## Local development
 
 ```bash
-docker compose up --build -d
+# 1) Build the Vue admin client (embedded into the binary via rust-embed)
+cd client
+npm ci
+npm run build
+cd ..
+
+# 2) Run the server (requires DATABASE_URL in .env or environment)
+cargo run --bin site_server
+
+# Type-check without running
+cargo check
 ```
 
-The app will be available at `http://localhost:3000`.
+For frontend iteration, run `npm run dev` in `client/` against the running server.
 
 ## Creating a User
 
-With Docker Compose running:
-
 ```bash
-docker compose exec app ./site_cli create-user <username> <password>
-```
-
-### Without Docker
-
-Set `DATABASE_URL` in `.env` or environment, then:
-
-```bash
+# Without Docker
 cargo run --bin site_cli -- create-user <username> <password>
+cargo run --bin site_cli -- change-password <username> <password>
+
+# With Docker Compose
+docker compose exec app ./site_cli create-user <username> <password>
 ```
 
 ## Database Migrations
@@ -45,22 +57,12 @@ cargo run --bin site_cli -- create-user <username> <password>
 Migrations run automatically on server startup. To manage them manually:
 
 ```bash
-# Apply all pending migrations
-cargo run --bin site_migration
+cargo run --bin site_migration              # apply all pending
+cargo run --bin site_migration -- down      # rollback last
+cargo run --bin site_migration -- fresh     # reset & reapply all
+cargo run --bin site_migration -- status    # show status
 
-# Rollback last migration
-cargo run --bin site_migration -- down
-
-# Reset and reapply all
-cargo run --bin site_migration -- fresh
-
-# Show migration status
-cargo run --bin site_migration -- status
-```
-
-With Docker Compose:
-
-```bash
+# With Docker Compose
 docker compose exec app ./site_migration
 ```
 
@@ -68,15 +70,17 @@ docker compose exec app ./site_migration
 
 | Variable | Description | Default |
 |---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string | `postgres://blog:blog@localhost:5432/blog` |
+| `DATABASE_URL` | PostgreSQL connection string | required (compose uses `postgres://blog:blog@db:5432/blog`) |
 | `RUST_LOG` | Log level filter | `site=debug,tower_http=debug,info` |
+| `PORT` | HTTP listen port | `3000` |
+| `NAMESPACE` | Selects the `assets/<NAMESPACE>/{templates,css,js,img}` bundle for public pages | `common` |
+| `SERPER_API_KEY` | Optional — enables the `web_search` tool inside the AI assistant | unset |
 
-## Development
+## Docker image (standalone)
 
 ```bash
-# Run locally (requires DATABASE_URL)
-cargo run --bin site_server
-
-# Check compilation
-cargo check
+docker build -t site .
+docker run -e DATABASE_URL=postgres://... -p 3000:3000 site
 ```
+
+The Dockerfile runs the Node stage first (Vue build into `client/dist/`), then the Rust stage (`cargo build --release`), and ships `site_server`, `site_migration`, and `site_cli` in a slim runtime image.

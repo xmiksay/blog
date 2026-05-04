@@ -114,6 +114,7 @@ const nav = [
   { to: '/galleries', label: 'Galleries' },
   { to: '/menu', label: 'Menu' },
   { to: '/tokens', label: 'Tokens' },
+  { to: '/users', label: 'Users' },
   { to: '/assistant', label: 'Assistant' },
   { to: '/providers', label: 'LLM providers' },
   { to: '/models', label: 'LLM models' },

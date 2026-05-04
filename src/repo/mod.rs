@@ -4,3 +4,4 @@ pub mod menu;
 pub mod pages;
 pub mod tags;
 pub mod tokens;
+pub mod users;

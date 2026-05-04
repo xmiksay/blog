@@ -29,7 +29,7 @@ onMounted(() => files.load(props.mimePrefix))
           <div class="aspect-square bg-gray-200 flex items-center justify-center">
             <img
               v-if="f.has_thumbnail"
-              :src="`/obrazky/${f.id}/nahled`"
+              :src="`/files/${f.hash}/nahled`"
               :alt="f.title"
               class="object-cover w-full h-full"
               loading="lazy"

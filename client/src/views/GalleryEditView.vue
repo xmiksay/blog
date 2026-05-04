@@ -132,7 +132,7 @@ function move(idx: number, dir: -1 | 1) {
         >
           <img
             v-if="lookup(id)?.has_thumbnail"
-            :src="`/obrazky/${id}/nahled`"
+            :src="`/files/${lookup(id)?.hash}/nahled`"
             class="w-12 h-12 object-cover bg-gray-100 rounded"
           />
           <div v-else class="w-12 h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-400">
