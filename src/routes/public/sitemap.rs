@@ -46,11 +46,8 @@ pub async fn sitemap(State(state): State<AppState>) -> Response {
     {
         Ok(rows) => rows,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sitemap error: {e}"),
-            )
-                .into_response();
+            tracing::error!("sitemap menu query failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "sitemap unavailable").into_response();
         }
     };
 
@@ -66,11 +63,8 @@ pub async fn sitemap(State(state): State<AppState>) -> Response {
     {
         Ok(rows) => rows,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sitemap error: {e}"),
-            )
-                .into_response();
+            tracing::error!("sitemap page query failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "sitemap unavailable").into_response();
         }
     };
 

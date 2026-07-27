@@ -12,6 +12,7 @@ use crate::repo::pages_search::{self as pages_search_repo, SearchError};
 use crate::routes::build_menu;
 use crate::state::AppState;
 
+use super::error_page;
 use super::pages::PageView;
 
 pub fn router() -> Router<AppState> {
@@ -76,7 +77,7 @@ pub async fn search(
         ),
         Err(SearchError::UnknownTag) => (Vec::new(), 0),
         Err(SearchError::Db(e)) => {
-            return Html(format!("<h1>Database error</h1><pre>{e}</pre>"));
+            return error_page("search db error", e);
         }
     };
 
@@ -107,7 +108,7 @@ pub async fn search(
     let env = state.tmpl.env();
     let tmpl = match env.get_template("page_search.html") {
         Ok(t) => t,
-        Err(e) => return Html(format!("<h1>Template error</h1><pre>{e}</pre>")),
+        Err(e) => return error_page("search template error", e),
     };
 
     match tmpl.render(context! {
@@ -126,6 +127,6 @@ pub async fn search(
         logged_in,
     }) {
         Ok(html) => Html(html),
-        Err(e) => Html(format!("<h1>Render error</h1><pre>{e}</pre>")),
+        Err(e) => error_page("search render error", e),
     }
 }

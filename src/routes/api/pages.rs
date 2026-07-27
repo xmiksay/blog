@@ -24,8 +24,8 @@ impl From<PageSaveError> for ApiError {
     fn from(e: PageSaveError) -> Self {
         match e {
             PageSaveError::EmptyPath => ApiError::BadRequest("path is required".into()),
-            PageSaveError::Db(db @ (sea_orm::DbErr::Exec(_) | sea_orm::DbErr::Query(_))) => {
-                ApiError::Conflict(format!("path already exists: {db}"))
+            PageSaveError::Db(sea_orm::DbErr::Exec(_) | sea_orm::DbErr::Query(_)) => {
+                ApiError::Conflict("path already exists".into())
             }
             PageSaveError::Db(db) => ApiError::from(db),
         }
