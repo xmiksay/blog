@@ -120,10 +120,17 @@ pub(super) async fn exchange_code(
         );
     }
 
-    // Mark code as used
+    // Mark code as used — this must land *before* tokens are issued, or a
+    // failed write leaves the code replayable (single-use guarantee).
     let mut active: oauth_code::ActiveModel = code_model.clone().into();
     active.used = Set(true);
-    let _ = active.update(&state.db).await;
+    if let Err(e) = active.update(&state.db).await {
+        tracing::error!("failed to mark oauth code as used: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "server_error"})),
+        );
+    }
 
     // Issue tokens
     issue_tokens(state, &code_model.client_id, code_model.user_id).await
@@ -163,10 +170,17 @@ pub(super) async fn refresh(
         }
     };
 
-    // Revoke old token
+    // Revoke the old token — must land *before* new tokens are issued, or a
+    // failed write leaves the old refresh token alive (rotation guarantee).
     let mut active: oauth_token::ActiveModel = tok.clone().into();
     active.revoked = Set(true);
-    let _ = active.update(&state.db).await;
+    if let Err(e) = active.update(&state.db).await {
+        tracing::error!("failed to revoke refresh token: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "server_error"})),
+        );
+    }
 
     // Issue new tokens
     issue_tokens(state, &tok.client_id, tok.user_id).await
