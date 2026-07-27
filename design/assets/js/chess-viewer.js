@@ -10,7 +10,7 @@ let uid = 0;
 function pieceTheme() {
     const ext = getComputedStyle(document.documentElement)
         .getPropertyValue('--chess-piece-ext').trim().replace(/['"]/g, '') || 'png';
-    return `/static/img/chesspieces/wikipedia/{piece}.${ext}`;
+    return `/assets/img/chesspieces/wikipedia/{piece}.${ext}`;
 }
 
 function enhanceChess(root = document) {
