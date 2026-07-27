@@ -23,12 +23,16 @@ make verify          # pre-"done" gate: lint + all tests
 
 Pure-logic tests live **in-module** in a `#[cfg(test)] mod tests` block at the
 bottom of the file under test — no `tests/` directory, no dev-dependencies.
-Good targets are dependency-free functions; current examples:
+Good targets are dependency-free functions. Most modules carry one by now
+(`src/ai/*`, `src/export/*`, `src/routes/oauth/security.rs`, `src/templates.rs`,
+…); representative examples:
 
 - `src/path_util.rs` — `normalize` / `normalize_prefix` (slug canonicalization).
 - `src/files.rs` — `hash_blob` (SHA-256 content addressing) against known vectors.
 - `src/markdown/tests.rs` — the largest suite: directive parsing, tag allow-listing,
   container collection.
+- `src/ai/projection/tests/` — event-log → transcript folding, a pure function
+  of the persisted `assistant_events` rows.
 
 Pattern:
 
@@ -147,6 +151,15 @@ executes on every PR rather than self-skipping.
   of what's exercised) plus, against a real fake MCP server, that the shared
   dispatch registry reflects an add/remove live and a tool becomes callable
   mid-session once its server is discovered (issue #38, no executor restart).
+- `tests/export_assets.rs`, `tests/export_bridge.rs`, `tests/export_routes.rs`
+  — the mdcast export subsystem (#63–#68): `DbAssetProvider`'s
+  content-addressed `file_blobs` resolution, the `render_for_export`
+  directive→plain-markdown bridge (image refs, pipe tables, spliced pages,
+  synthesized fen/pgn/mermaid diagrams), and both export routes (public
+  `/{*path}?format=pdf|slides` and admin `/api/export/pages/{id}`).
+- `tests/assistant_providers_status.rs` — `GET /api/assistant/providers/status`
+  (#89): DB-gated only; the idle throttle-status path never makes a real
+  provider HTTP request.
 - The assistant-session flow — drives a session through the real HTTP API
   (`tower::ServiceExt::oneshot`, no socket) end to end: create, message, tool
   call, approve. Split by scenario across several top-level test files (each
@@ -201,3 +214,13 @@ executes on every PR rather than self-skipping.
     `session_for_call_awaiting` itself, re-exported `pub` from `sessions::`
     solely for this test to reach; the unknown-id case needs no such
     contrivance and drives the real `POST .../approve` endpoint.
+  - `tests/assistant_session_compact.rs` (#40) — context compaction via a
+    scripted `Llm`: overflow auto-summarizes (emits `Compacted { auto: true }`)
+    instead of silently pruning, and manual `POST .../compact` forks a
+    successor engine session and retires the source.
+  - `tests/assistant_session_generation.rs` (#42) — live
+    `SetModel`/`SetAgent`/`SetGeneration` switching through the real HTTP
+    API; rebind-only, so no live LLM backend is needed.
+  - `tests/assistant_session_parallel_approval.rs` — regression: a decision
+    on one of several parallel tool calls settles per *tool call*, not per
+    whole-session, so approving one call can't hang on its siblings.

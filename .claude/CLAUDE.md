@@ -40,7 +40,8 @@ make check      # fast cargo check
 make            # list all targets
 ```
 
-Migrations & users (run as needed — not wrapped by make):
+Migrations & users (`make migrate` wraps the plain apply; the subcommands and
+`site_cli` are run directly):
 
 ```bash
 cargo run --bin site_migration              # apply all
