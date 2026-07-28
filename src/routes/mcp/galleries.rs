@@ -10,7 +10,9 @@ use crate::repo::galleries::{
 use crate::routes::broadcast;
 use crate::state::AppState;
 
-use super::rpc::{JsonRpcResponse, json_result, parse_args, tool_error, tool_result};
+use super::rpc::{
+    JsonRpcResponse, json_result, parse_args, tool_db_error, tool_error, tool_result,
+};
 
 #[derive(Deserialize)]
 struct GalleryIdArgs {
@@ -48,7 +50,7 @@ pub(super) async fn tool_gallery_list(state: &AppState, id: Option<Value>) -> Js
                 .collect();
             tool_result(id, lines.join("\n"))
         }
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
+        Err(e) => tool_db_error(id, "Database error", e),
     }
 }
 
@@ -73,7 +75,7 @@ pub(super) async fn tool_gallery_read(
             }),
         ),
         Ok(None) => tool_error(id, &format!("Gallery not found: {}", args.id)),
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
+        Err(e) => tool_db_error(id, "Database error", e),
     }
 }
 
@@ -106,7 +108,7 @@ pub(super) async fn tool_gallery_create(
         Err(e @ (GallerySaveError::EmptyTitle | GallerySaveError::EmptyPath)) => {
             tool_error(id, &e.to_string())
         }
-        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+        Err(e) => tool_db_error(id, "Create failed", e),
     }
 }
 
@@ -138,7 +140,7 @@ pub(super) async fn tool_gallery_update(
         }
         Ok(None) => tool_error(id, &format!("Gallery not found: {gallery_id}")),
         Err(e @ GallerySaveError::EmptyPath) => tool_error(id, &e.to_string()),
-        Err(e) => tool_error(id, &format!("Update failed: {e}")),
+        Err(e) => tool_db_error(id, "Update failed", e),
     }
 }
 
@@ -157,6 +159,6 @@ pub(super) async fn tool_gallery_delete(
             tool_result(id, format!("deleted gallery {}", args.id))
         }
         Ok(false) => tool_error(id, &format!("Gallery not found: {}", args.id)),
-        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+        Err(e) => tool_db_error(id, "Delete failed", e),
     }
 }

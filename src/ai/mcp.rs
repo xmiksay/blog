@@ -115,7 +115,12 @@ impl SiteMcp {
         let Some((_, removed)) = self.cache.remove(&user_id) else {
             return;
         };
-        let mut reg = self.registry.write().unwrap();
+        // Registry mutations are idempotent (upsert/unregister by name), so a
+        // poisoned lock from another task's panic is safe to proceed past.
+        let mut reg = self
+            .registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         'names: for name in removed.routes.keys() {
             for other in self.cache.iter() {
                 if other.routes.contains_key(name) {
@@ -136,7 +141,10 @@ impl SiteMcp {
         let Some(mcp) = self.self_ref.get().and_then(Weak::upgrade) else {
             return;
         };
-        let mut reg = self.registry.write().unwrap();
+        let mut reg = self
+            .registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for name in routes.keys() {
             if !reg.contains(name) {
                 reg.register(McpRoutedTool::new(name.clone(), mcp.clone()));

@@ -17,6 +17,13 @@ use crate::routes::{Menu, build_menu};
 use crate::state::AppState;
 use crate::{auth, markdown};
 
+/// Log the real error and serve a generic page — template paths and DB/SQL
+/// detail must not reach anonymous visitors.
+pub(super) fn error_page(context: &str, err: impl std::fmt::Display) -> Html<String> {
+    tracing::error!("{context}: {err}");
+    Html("<h1>Something went wrong</h1>".to_string())
+}
+
 /// A path resolved to either a menu item or a page — the two content kinds
 /// `catch_all` (and the export route) look up by path, in that priority
 /// order.
@@ -83,7 +90,7 @@ pub async fn catch_all(
     let env = state.tmpl.env();
     let tmpl = match env.get_template("path_page.html") {
         Ok(t) => t,
-        Err(e) => return Html(format!("<h1>Template error</h1><pre>{e}</pre>")),
+        Err(e) => return error_page("template error", e),
     };
 
     let Some(content) = lookup_content(&state.db, &path).await else {
@@ -104,7 +111,7 @@ pub async fn catch_all(
                 menu_id => menu_item.id,
             }) {
                 Ok(html) => Html(html),
-                Err(e) => Html(format!("<h1>Render error</h1><pre>{e}</pre>")),
+                Err(e) => error_page("render error", e),
             }
         }
         PathContent::Page(pg) => {
@@ -131,7 +138,7 @@ pub async fn catch_all(
                 logged_in,
             }) {
                 Ok(html) => Html(html),
-                Err(e) => Html(format!("<h1>Render error</h1><pre>{e}</pre>")),
+                Err(e) => error_page("render error", e),
             }
         }
     }
@@ -139,7 +146,11 @@ pub async fn catch_all(
 
 fn render_404(state: &AppState, nav: &Menu, logged_in: bool) -> Html<String> {
     let env = state.tmpl.env();
-    let tmpl = env.get_template("404.html").unwrap();
+    // A partial DESIGN_DIR bundle may lack 404.html — fall back rather than
+    // panic on every not-found.
+    let Ok(tmpl) = env.get_template("404.html") else {
+        return Html("<h1>Page not found</h1>".to_string());
+    };
     match tmpl.render(context! {
         menu_list => &nav.list,
         menu_tree => &nav.tree,

@@ -22,12 +22,17 @@ pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .expect("Hash failed")
+        .expect("argon2 with default params and a fresh salt cannot fail")
         .to_string()
 }
 
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    let parsed = PasswordHash::new(hash).expect("Invalid hash");
+    // The hash comes from the DB — a corrupt/legacy row must fail the login,
+    // not panic the request task.
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        tracing::error!("stored password hash is malformed");
+        return false;
+    };
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
@@ -96,4 +101,22 @@ pub async fn is_logged_in(state: &AppState, jar: &CookieJar) -> Option<i32> {
         }
     }
     Some(tok.user_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_round_trip() {
+        let hash = hash_password("s3cret");
+        assert!(verify_password("s3cret", &hash));
+        assert!(!verify_password("wrong", &hash));
+    }
+
+    #[test]
+    fn malformed_stored_hash_fails_instead_of_panicking() {
+        assert!(!verify_password("anything", "not-a-phc-string"));
+        assert!(!verify_password("anything", ""));
+    }
 }

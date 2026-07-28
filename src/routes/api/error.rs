@@ -46,9 +46,29 @@ impl IntoResponse for ApiError {
 
 impl From<DbErr> for ApiError {
     fn from(err: DbErr) -> Self {
+        // Full detail goes to the log only — DbErr strings carry table/column
+        // names and SQL fragments that must not reach clients.
         tracing::error!("DB error: {err}");
-        Self::Internal(err.to_string())
+        Self::Internal("internal error".into())
     }
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_error_is_not_leaked_to_clients() {
+        let err = DbErr::Custom("relation \"secret_table\" does not exist".into());
+        let api: ApiError = err.into();
+        match api {
+            ApiError::Internal(msg) => {
+                assert_eq!(msg, "internal error");
+                assert!(!msg.contains("secret_table"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+}

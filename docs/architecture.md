@@ -171,7 +171,7 @@ tool_permissions    id, user_id, name pattern, effect (allow|deny|prompt),
 |---|---|---|
 | `/files/{hash}` | GET | Full file (content-addressed, cacheable) |
 | `/files/{hash}/nahled` | GET | Thumbnail |
-| `/tag/{name}` | GET | Tag listing |
+| `/tag/{id}` | GET | 302 redirect to `/search?tag=<name>` |
 | `/search?q=...` | GET | Fulltext search |
 | `/sitemap.xml` | GET | Sitemap |
 | `/assets/{*path}` | GET | Static files (`DESIGN_DIR` override → baked `design/assets/{css,js,img}`) |

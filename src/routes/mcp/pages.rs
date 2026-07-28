@@ -13,7 +13,7 @@ use crate::repo::{
 use crate::routes::broadcast;
 use crate::state::AppState;
 
-use super::rpc::{JsonRpcResponse, parse_args, tool_error, tool_result};
+use super::rpc::{JsonRpcResponse, parse_args, tool_db_error, tool_error, tool_result};
 
 #[derive(Deserialize)]
 struct ReadPageArgs {
@@ -66,7 +66,7 @@ pub(super) async fn tool_page_read(
             tool_result(id, format::format_page(&p, &tag_names))
         }
         Ok(None) => tool_error(id, &format!("Page not found: {}", args.path)),
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
+        Err(e) => tool_db_error(id, "Database error", e),
     }
 }
 
@@ -93,7 +93,7 @@ pub(super) async fn tool_page_edit(
     let (tag_ids, skipped) = match &args.tag_names {
         Some(names) if !names.is_empty() => match tags_repo::resolve_ids(&state.db, names).await {
             Ok(r) => (Some(r.ids), r.missing),
-            Err(e) => return tool_error(id, &format!("Database error: {e}")),
+            Err(e) => return tool_db_error(id, "Database error", e),
         },
         _ => (None, Vec::new()),
     };
@@ -135,7 +135,7 @@ pub(super) async fn tool_page_edit(
             )
         }
         Err(e @ PageSaveError::EmptyPath) => tool_error(id, &e.to_string()),
-        Err(e) => tool_error(id, &format!("Save failed: {e}")),
+        Err(e) => tool_db_error(id, "Save failed", e),
     }
 }
 
@@ -167,7 +167,7 @@ pub(super) async fn tool_page_search(
             return tool_result(id, "No pages found.".into());
         }
         Err(SearchError::Db(e)) => {
-            return tool_error(id, &format!("Database error: {e}"));
+            return tool_db_error(id, "Database error", e);
         }
     };
 
@@ -189,6 +189,6 @@ pub(super) async fn tool_page_delete(
             tool_result(id, format!("deleted: {}", args.path))
         }
         Ok(None) => tool_error(id, &format!("Page not found: {}", args.path)),
-        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+        Err(e) => tool_db_error(id, "Delete failed", e),
     }
 }

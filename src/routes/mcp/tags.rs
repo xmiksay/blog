@@ -11,7 +11,9 @@ use crate::repo::{
 use crate::routes::broadcast;
 use crate::state::AppState;
 
-use super::rpc::{JsonRpcResponse, json_result, parse_args, tool_error, tool_result};
+use super::rpc::{
+    JsonRpcResponse, json_result, parse_args, tool_db_error, tool_error, tool_result,
+};
 
 #[derive(Deserialize)]
 struct TagArgs {
@@ -37,7 +39,7 @@ struct UpdateTagArgs {
 pub(super) async fn tool_tag_list(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
     match tags_repo::list_all(&state.db).await {
         Ok(tags) => tool_result(id, format::format_tags(&tags)),
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
+        Err(e) => tool_db_error(id, "Database error", e),
     }
 }
 
@@ -56,7 +58,7 @@ pub(super) async fn tool_tag_read(
             json!({ "id": t.id, "name": t.name, "description": t.description }),
         ),
         Ok(None) => tool_error(id, &format!("Tag not found: {}", args.name)),
-        Err(e) => tool_error(id, &format!("Database error: {e}")),
+        Err(e) => tool_db_error(id, "Database error", e),
     }
 }
 
@@ -83,7 +85,7 @@ pub(super) async fn tool_tag_create(
             tool_result(id, format!("created tag [{}] {}", t.id, t.name))
         }
         Err(e @ TagSaveError::EmptyName) => tool_error(id, &e.to_string()),
-        Err(e) => tool_error(id, &format!("Create failed: {e}")),
+        Err(e) => tool_db_error(id, "Create failed", e),
     }
 }
 
@@ -112,7 +114,7 @@ pub(super) async fn tool_tag_update(
             tool_result(id, format!("updated tag [{}] {}", t.id, t.name))
         }
         Ok(None) => tool_error(id, &format!("Tag not found: {name}")),
-        Err(e) => tool_error(id, &format!("Update failed: {e}")),
+        Err(e) => tool_db_error(id, "Update failed", e),
     }
 }
 
@@ -131,6 +133,6 @@ pub(super) async fn tool_tag_delete(
             tool_result(id, format!("deleted tag {}", args.name))
         }
         Ok(None) => tool_error(id, &format!("Tag not found: {}", args.name)),
-        Err(e) => tool_error(id, &format!("Delete failed: {e}")),
+        Err(e) => tool_db_error(id, "Delete failed", e),
     }
 }

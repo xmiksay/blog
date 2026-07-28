@@ -84,6 +84,18 @@ pub(super) fn tool_error(id: Option<Value>, message: &str) -> JsonRpcResponse {
     )
 }
 
+/// Log the underlying error and return only the operation label — raw `DbErr`
+/// strings (tables, constraints, SQL) must not reach MCP clients, which can
+/// be external OAuth-authenticated callers.
+pub(super) fn tool_db_error(
+    id: Option<Value>,
+    what: &str,
+    err: impl std::fmt::Display,
+) -> JsonRpcResponse {
+    tracing::error!("mcp tool: {what}: {err}");
+    tool_error(id, what)
+}
+
 pub(super) fn json_result(id: Option<Value>, value: Value) -> JsonRpcResponse {
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     tool_result(id, text)
