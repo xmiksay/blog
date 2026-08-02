@@ -7,8 +7,15 @@
 // than threading it through props.
 import { computed, ref, watch } from 'vue'
 import { useAssistantStore } from '../stores/assistant'
+import { profileIcon } from '../composables/useAssistantContent'
 
 const assistant = useAssistantStore()
+
+// A sub-agent session (#99) runs under the profile and model its parent
+// spawned it with, and the server refuses to switch either or to compact it
+// (#101). Hide those controls rather than offer a click that 4xxs — the MCP
+// and generation pickers stay, they are not part of the spawn contract.
+const readOnly = computed(() => assistant.current?.parent_session_id != null)
 
 const emit = defineEmits<{ compacted: [] }>()
 
@@ -128,7 +135,16 @@ async function applyThinkingBudget() {
 
 <template>
   <div v-if="assistant.current" class="text-xs text-gray-500 flex items-center gap-2">
+    <span
+      v-if="readOnly"
+      class="rounded bg-gray-100 px-2 py-1 whitespace-nowrap"
+      :title="`Sub-agent of chat #${assistant.current.parent_session_id} — model, profile and compaction are fixed by its parent`"
+    >
+      {{ profileIcon(assistant.current.agent_profile) }} {{ assistant.current.agent_profile }} ·
+      {{ assistant.current.model }}
+    </span>
     <select
+      v-if="!readOnly"
       class="border rounded px-2 py-1 text-xs"
       :value="assistant.current.model_id ?? ''"
       @change="changeModel(Number(($event.target as HTMLSelectElement).value))"
@@ -141,6 +157,7 @@ async function applyThinkingBudget() {
       </option>
     </select>
     <select
+      v-if="!readOnly"
       class="border rounded px-2 py-1 text-xs"
       :value="assistant.current.agent_profile"
       title="Agent profile — what tools this chat may use"
@@ -151,6 +168,7 @@ async function applyThinkingBudget() {
       <option value="page-writer">Page writer</option>
     </select>
     <button
+      v-if="!readOnly"
       type="button"
       class="border rounded px-2 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
       title="Summarize this chat's history into a fresh session"

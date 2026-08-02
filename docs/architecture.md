@@ -687,6 +687,33 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
     regardless, since that is what the client keys the inline
     running-sub-agent card on.
 
+**Admin UI — the session tree (`client/`, #103).** Because a sub-agent is a
+session row of its own (#99), `GET /sessions` returns a *flat* list mixing roots
+and children, which `client/src/composables/useSessionTree.ts` folds into the
+spawn tree the sidebar renders: roots `updated_at DESC`, children `created_at
+ASC` within a parent, arbitrary depth (a sub-agent can spawn its own), and every
+input row placed exactly once — a row whose `parent_session_id` names a session
+missing from the list (an **orphan**) renders at root level rather than
+vanishing, and the same fallback breaks a corrupt parent cycle.
+`AssistantSessionTree.vue` renders it collapsed by default (entanglement's
+per-root spawn budget is 16, so a research-heavy chat contributes dozens of
+child rows), auto-expanding the ancestors of whatever session is open. Delete is
+offered on roots only — a child delete is refused server-side, and a root's own
+delete cascades the sub-tree (m_032's self-FK), which is why
+`stores/assistant.ts`'s `deleteSession` refetches the list instead of filtering
+one id out of it. Entry points into a child are the tree itself and the
+`content.sub_agents` card in the parent transcript, which
+`AssistantMessageContent.vue` makes clickable when the card carries a
+`child_db_session_id` (absent when the server never placed the child's row — the
+card then renders inert rather than as a dead link); either way the child's own
+transcript comes from `GET /sessions/{child_id}` at top level, and while it is
+still streaming `AssistantView.vue` matches its live card on the envelope's
+`child_db_session_id` as well as the root's `db_session_id` (#102) so the
+child's view streams rather than sitting blank until the turn settles. On a child
+session `AssistantSessionToolbar.vue` drops the model picker, the profile switch
+and Compact, since those are fixed by the spawn — sending a message to a child
+stays allowed.
+
 Configured per user via the admin SPA: `/admin/{providers,models,assistant,mcp-servers,tool-permissions}`. Provider API keys live in `llm_providers.api_key` (set through the UI, never in `.env`).
 
 ## Export (mdcast)
@@ -730,7 +757,7 @@ Frames are JSON `Envelope { topic, event, payload }`, `topic` one of `assistant 
 
 Server sends a WS ping every 30s; a failed send (or a client `Close` frame) drops that connection's sender from the registry. `WsHub::publish`/`broadcast` also prune any sender whose receiver has been dropped.
 
-Client side: `client/src/stores/ws.ts` owns the single connection (reconnect with exponential backoff) and topic→handler dispatch; `client/src/composables/useListSync.ts` wires `pages`/`files`/`galleries`/`tags` events into the matching Pinia store's `items` list; `client/src/stores/assistantLiveTurns.ts` (composed into `stores/assistant.ts`) accumulates `assistant.*` deltas into a `live: LiveTurn | null` (the root turn) and, since #17, `liveSubAgents: Record<string, LiveSubAgentTurn>` keyed by `agent_session_id` — a sub-agent's events carry that field instead of belonging to the root, and it is tracked independently of `live` since a detached child keeps streaming after the root's own turn has already settled. Both are rendered by `AssistantView.vue` as in-progress bubbles (`LiveSubAgentTurn.vue`/`LiveToolCallList.vue`), and on a turn's own `done`/`error`/`session_hibernated`/`compacted` (#40) the matching entry clears and the session refetches over REST for the authoritative message list — for a settling child, that is the parent when the parent is the open session and (#102, off `child_db_session_id`) the child itself when *it* is the one open — reusing `ai::projection::project`'s fold (including its `content.sub_agents` nesting, rendered by the self-recursive `AssistantMessageContent.vue`) rather than re-implementing it in TypeScript. `client/src/App.vue` connects after login, disconnects on logout. `AssistantView.vue`'s header also has a "Compact" button (`assistant.compactSession`) that `POST`s `sessions/{id}/compact` and swaps in the returned successor-session detail directly.
+Client side: `client/src/stores/ws.ts` owns the single connection (reconnect with exponential backoff) and topic→handler dispatch; `client/src/composables/useListSync.ts` wires `pages`/`files`/`galleries`/`tags` events into the matching Pinia store's `items` list; `client/src/stores/assistantLiveTurns.ts` (composed into `stores/assistant.ts`) accumulates `assistant.*` deltas into a `live: LiveTurn | null` (the root turn) and, since #17, `liveSubAgents: Record<string, LiveSubAgentTurn>` keyed by `agent_session_id` — a sub-agent's events carry that field instead of belonging to the root, and it is tracked independently of `live` since a detached child keeps streaming after the root's own turn has already settled. Both are rendered by `AssistantView.vue` as in-progress bubbles (`LiveSubAgentTurn.vue`/`LiveToolCallList.vue`), and on a turn's own `done`/`error`/`session_hibernated`/`compacted` (#40) the matching entry clears and the session refetches over REST for the authoritative message list — for a settling child, that is the parent when the parent is the open session and (#102, off `child_db_session_id`) the child itself when *it* is the one open — reusing `ai::projection::project`'s per-session fold rather than re-implementing it in TypeScript — a fold whose `content.sub_agents` entries are, since #100, flat reference cards rather than nested transcripts, so `AssistantMessageContent.vue` is no longer self-recursive and instead renders each card as a link into that child's own session (#103, see "Admin UI" above). `client/src/App.vue` connects after login, disconnects on logout. `AssistantView.vue`'s header also has a "Compact" button (`assistant.compactSession`) that `POST`s `sessions/{id}/compact` and swaps in the returned successor-session detail directly.
 
 ## Docker
 

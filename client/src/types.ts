@@ -176,23 +176,22 @@ export interface LiveTurn {
 }
 
 /**
- * A sub-agent (`researcher`/`page-writer`) spawned mid-turn via an
- * `agent_spawn`/`agent` tool call, as returned in the REST transcript on the
- * assistant message whose `tool_calls` includes that spawn — a sibling of
- * `tool_calls` on `AssistantMessage.content`, not a separate top-level
- * message. The backend matches each entry to its spawning call structurally
- * (via the call's own tool_result, not array position — a batch of several
- * spawns, or an earlier refused spawn, can't misattribute a child), so `task`
- * (copied from that same call's `args.prompt`) is already the right one —
- * never re-derive it by index. `messages` never contains a `role: "user"`
- * entry — that's what `task` is for.
- */
-/**
- * A reference card for a sub-agent session spawned by this message (#100).
- * It carries no transcript: since every sub-agent is an `assistant_sessions`
- * row of its own, the messages are read by opening `child_db_session_id` —
- * absent only when the server couldn't place the child's row, in which case
- * the card renders flat rather than as a dead link.
+ * A reference card for a sub-agent (`researcher`/`page-writer`) spawned
+ * mid-turn via an `agent_spawn`/`agent` tool call, as returned in the REST
+ * transcript on the assistant message whose `tool_calls` includes that spawn —
+ * a sibling of `tool_calls` on `AssistantMessage.content`, not a separate
+ * top-level message. The backend matches each entry to its spawning call
+ * structurally (via the call's own tool_result, not array position — a batch
+ * of several spawns, or an earlier refused spawn, can't misattribute a child),
+ * so `task` (copied from that same call's `args.prompt`) is already the right
+ * one — never re-derive it by index.
+ *
+ * The card carries no transcript (#100): since every sub-agent is an
+ * `assistant_sessions` row of its own, the messages are read by opening
+ * `child_db_session_id` — which `AssistantMessageContent.vue` makes the card's
+ * click target (#103). It is absent only when the server couldn't place the
+ * child's row, in which case the card renders flat and inert rather than as a
+ * dead link.
  */
 export interface AssistantSubAgent {
   agent_id: string

@@ -2,8 +2,8 @@
 // (`{ text?, reasoning?, tool_calls?, requires_approval?, decisions?,
 // sub_agents? }` for `assistant` messages, `{ tool_call_id, output, is_error }`
 // for `tool_result`, or a bare string). Shared by `AssistantMessageContent.vue`
-// (used both top-level and recursively for nested sub-agent transcripts) and
-// `LiveToolCallList.vue`.
+// and `LiveToolCallList.vue`; `profileIcon` is shared further with
+// `LiveSubAgentTurn.vue` and the session tree (#103).
 
 export interface ToolCallView {
   id: string

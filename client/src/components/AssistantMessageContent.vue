@@ -24,7 +24,10 @@ const props = defineProps<{
   messageId: number
 }>()
 
-const emit = defineEmits<{ decided: [] }>()
+// `selectSession` carries a sub-agent card's `child_db_session_id` up to
+// `AssistantView`, which owns session selection — the card never loads a
+// session itself.
+const emit = defineEmits<{ decided: []; selectSession: [id: number] }>()
 
 const assistant = useAssistantStore()
 
@@ -194,12 +197,23 @@ async function decideAll(calls: ToolCallView[], approve: boolean, remember = fal
       </button>
     </div>
     <!-- A sub-agent is its own session (#99), so this is a reference card, not
-         a nested transcript. Selecting it from here is #103's job; until then
-         it stays a static summary rather than an empty disclosure. -->
-    <div
+         a nested transcript: clicking it opens the child's own session (#103).
+         `child_db_session_id` is absent when the server never placed the
+         child's row, so the card renders flat rather than as a dead link — a
+         plain `div`, no hover affordance, no click. -->
+    <component
+      :is="sa.child_db_session_id != null ? 'button' : 'div'"
       v-for="sa in subAgents"
       :key="sa.agent_id"
-      class="ml-2 border-l-2 border-gray-200 pl-2 py-1 text-xs text-gray-500 space-y-0.5"
+      :type="sa.child_db_session_id != null ? 'button' : undefined"
+      class="ml-2 border-l-2 border-gray-200 pl-2 py-1 text-xs text-gray-500 space-y-0.5 block w-full text-left"
+      :class="
+        sa.child_db_session_id != null
+          ? 'cursor-pointer hover:border-gray-400 hover:bg-gray-50'
+          : ''
+      "
+      :title="sa.child_db_session_id != null ? 'Open this sub-agent’s chat' : undefined"
+      @click="sa.child_db_session_id != null && emit('selectSession', sa.child_db_session_id)"
     >
       <div>
         {{ profileIcon(sa.profile) }} {{ sa.profile }}
@@ -207,7 +221,7 @@ async function decideAll(calls: ToolCallView[], approve: boolean, remember = fal
         <span class="text-gray-400">({{ sa.message_count }} messages)</span>
       </div>
       <div v-if="sa.preview" class="text-gray-600 italic">{{ sa.preview }}</div>
-    </div>
+    </component>
   </div>
   <div v-else-if="role === 'tool_result'" class="text-xs ml-2">
     <details

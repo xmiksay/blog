@@ -81,6 +81,10 @@ export const useAssistantStore = defineStore('assistant', () => {
     await apiVoid(`/api/assistant/sessions/${id}`, { method: 'DELETE' })
     sessions.value = sessions.value.filter((s) => s.id !== id)
     if (current.value?.id === id) current.value = null
+    // Deleting a root cascades onto its sub-agent rows (m_032's self-FK, #99),
+    // so dropping only this id would leave their rows behind as orphans in the
+    // session tree — refetch rather than guess the sub-tree client-side.
+    await loadSessions()
   }
 
   async function sendMessage(id: number, text: string) {

@@ -6,6 +6,8 @@ import AssistantMessageContent from '../components/AssistantMessageContent.vue'
 import LiveToolCallList from '../components/LiveToolCallList.vue'
 import LiveSubAgentTurnCard from '../components/LiveSubAgentTurn.vue'
 import AssistantSessionToolbar from '../components/AssistantSessionToolbar.vue'
+import AssistantSessionTree from '../components/AssistantSessionTree.vue'
+import { firstRootSession } from '../composables/useSessionTree'
 
 const assistant = useAssistantStore()
 const draft = ref('')
@@ -18,9 +20,11 @@ onMounted(async () => {
     assistant.loadPermissions(),
     assistant.loadMcpServers(),
   ])
-  if (assistant.sessions.length > 0) {
-    await select(assistant.sessions[0].id)
-  }
+  // The first *root*, not `sessions[0]`: since #99 a sub-agent is a session
+  // row too, so the API's first entry can be a child — opening one by default
+  // would land the user in a read-only sub-transcript.
+  const first = firstRootSession(assistant.sessions)
+  if (first) await select(first.id)
 })
 
 async function newSession() {
@@ -58,8 +62,9 @@ watch(() => assistant.current?.messages.length, scrollToBottom)
 async function deleteSession(id: number) {
   if (!confirm('Delete this chat?')) return
   await assistant.deleteSession(id)
-  if (!assistant.current && assistant.sessions.length > 0) {
-    await select(assistant.sessions[0].id)
+  if (!assistant.current) {
+    const next = firstRootSession(assistant.sessions)
+    if (next) await select(next.id)
   }
 }
 
@@ -89,11 +94,18 @@ watch(() => [liveTurn.value?.text, liveTurn.value?.toolCalls.length], scrollToBo
 // session — see `LiveSubAgentTurn`'s doc in types.ts. Filtered the same way
 // `liveTurn` is (by the currently open session's id), since a child can
 // outlive the root's own `live` turn and keeps its entry independently.
-const liveSubAgentsForCurrent = computed(() =>
-  Object.values(assistant.liveSubAgents).filter(
-    (turn) => turn.dbSessionId === assistant.current?.id,
-  ),
-)
+// `dbSessionId` is the **root's** row, so matching `childDbSessionId` too
+// (#102) is what keeps the child's *own* session view live instead of blank
+// until its turn settles and the REST refetch lands.
+const liveSubAgentsForCurrent = computed(() => {
+  const openId = assistant.current?.id
+  // Explicit null-check: `childDbSessionId` is optional, so a bare
+  // `=== assistant.current?.id` would match every card once nothing is open.
+  if (openId == null) return []
+  return Object.values(assistant.liveSubAgents).filter(
+    (turn) => turn.dbSessionId === openId || turn.childDbSessionId === openId,
+  )
+})
 
 watch(
   () => liveSubAgentsForCurrent.value.map((t) => t.text.length + t.toolCalls.length).join(','),
@@ -116,30 +128,12 @@ watch(
           New
         </button>
       </div>
-      <div class="flex-1 overflow-y-auto">
-        <button
-          v-for="s in assistant.sessions"
-          :key="s.id"
-          class="w-full text-left px-3 py-2 border-b border-gray-100 hover:bg-gray-50 flex justify-between items-start gap-2"
-          :class="assistant.current?.id === s.id ? 'bg-gray-100' : ''"
-          @click="select(s.id)"
-        >
-          <div class="flex-1 min-w-0">
-            <div class="text-sm font-medium truncate">{{ s.title }}</div>
-            <div class="text-xs text-gray-500">{{ s.model }}</div>
-          </div>
-          <button
-            class="text-xs text-gray-400 hover:text-red-500 shrink-0"
-            @click.stop="deleteSession(s.id)"
-            title="Delete"
-          >
-            ×
-          </button>
-        </button>
-        <div v-if="assistant.sessions.length === 0" class="p-4 text-sm text-gray-400">
-          No chats yet.
-        </div>
-      </div>
+      <AssistantSessionTree
+        :sessions="assistant.sessions"
+        :current-id="assistant.current?.id ?? null"
+        @select="select"
+        @delete="deleteSession"
+      />
     </aside>
 
     <section
@@ -177,6 +171,7 @@ watch(
           :content="m.content"
           :message-id="m.id"
           @decided="scrollToBottom"
+          @select-session="select"
         />
         <div v-if="liveTurn" class="space-y-1">
           <div

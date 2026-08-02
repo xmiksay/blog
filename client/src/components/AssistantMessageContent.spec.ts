@@ -120,31 +120,58 @@ describe('AssistantMessageContent', () => {
   // #100: a sub-agent contributes a reference card, never a nested
   // transcript. The old recursive `<details>` rendered nothing at all for a
   // grandchild; the card has to read on its own, without a click.
+  function subAgentContent(card: Record<string, any>) {
+    return {
+      text: null,
+      tool_calls: [{ id: 'spawn-1', name: 'agent_spawn', args: {}, resolved: true }],
+      sub_agents: [card],
+    }
+  }
+
+  const card = {
+    agent_id: 'a-uuid',
+    profile: 'researcher',
+    task: 'look into X',
+    message_count: 4,
+    preview: 'X is interesting.',
+    child_db_session_id: 7,
+  }
+
   it('renders a sub-agent as a summary card, not a nested transcript', () => {
     const wrapper = mount(AssistantMessageContent, {
-      props: {
-        role: 'assistant',
-        content: {
-          text: null,
-          tool_calls: [{ id: 'spawn-1', name: 'agent_spawn', args: {}, resolved: true }],
-          sub_agents: [
-            {
-              agent_id: 'a-uuid',
-              profile: 'researcher',
-              task: 'look into X',
-              message_count: 4,
-              preview: 'X is interesting.',
-              child_db_session_id: 7,
-            },
-          ],
-        },
-        messageId: 0,
-      },
+      props: { role: 'assistant', content: subAgentContent(card), messageId: 0 },
     })
 
     expect(wrapper.text()).toContain('researcher')
     expect(wrapper.text()).toContain('look into X')
     expect(wrapper.text()).toContain('4 messages')
     expect(wrapper.text()).toContain('X is interesting.')
+  })
+
+  // #103: the card is the way into the child's own session — the view owns
+  // selection, so the card only emits.
+  it('emits selectSession with the card’s child_db_session_id when clicked', async () => {
+    const wrapper = mount(AssistantMessageContent, {
+      props: { role: 'assistant', content: subAgentContent(card), messageId: 0 },
+    })
+
+    const button = wrapper.get('button')
+    expect(button.text()).toContain('researcher')
+    await button.trigger('click')
+    expect(wrapper.emitted('selectSession')).toEqual([[7]])
+  })
+
+  it('renders a card without child_db_session_id, but inert', async () => {
+    const orphan = { ...card, child_db_session_id: undefined }
+    const wrapper = mount(AssistantMessageContent, {
+      props: { role: 'assistant', content: subAgentContent(orphan), messageId: 0 },
+    })
+
+    expect(wrapper.text()).toContain('look into X')
+    // No click target at all — a card that can't be opened must not look like
+    // one that can.
+    expect(wrapper.find('button').exists()).toBe(false)
+    await wrapper.get('div.border-gray-200').trigger('click')
+    expect(wrapper.emitted('selectSession')).toBeUndefined()
   })
 })

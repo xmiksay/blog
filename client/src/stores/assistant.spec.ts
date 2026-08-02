@@ -122,3 +122,50 @@ describe('assistant store — sub-agent live routing', () => {
     expect(Object.keys(store.liveSubAgents)).toHaveLength(0)
   })
 })
+
+// The session list is the tree's only input (#103), so the summary must carry
+// the parentage columns m_032 added (#99) through the store untouched.
+describe('assistant store — session summaries', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('keeps parent_session_id / root_engine_session_id on the listed sessions', async () => {
+    const store = useAssistantStore()
+    apiMock.mockResolvedValueOnce([
+      { id: 1, title: 'root', parent_session_id: null, root_engine_session_id: 'u1:root' },
+      {
+        id: 2,
+        title: 'researcher',
+        parent_session_id: 1,
+        root_engine_session_id: 'u1:root',
+        agent_profile: 'researcher',
+      },
+    ] as any)
+
+    await store.loadSessions()
+
+    expect(store.sessions[0]).toMatchObject({ parent_session_id: null })
+    expect(store.sessions[1]).toMatchObject({
+      parent_session_id: 1,
+      root_engine_session_id: 'u1:root',
+      agent_profile: 'researcher',
+    })
+  })
+
+  it('refetches the list after a delete, since the root cascades onto its children', async () => {
+    const store = useAssistantStore()
+    apiMock.mockResolvedValueOnce([
+      { id: 1, parent_session_id: null },
+      { id: 2, parent_session_id: 1 },
+    ] as any)
+    await store.loadSessions()
+
+    apiMock.mockResolvedValueOnce([] as any)
+    await store.deleteSession(1)
+
+    // Not just `[{id: 2}]` — the child row is gone server-side too.
+    expect(store.sessions).toEqual([])
+  })
+})
