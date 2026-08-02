@@ -1,6 +1,23 @@
-//! Context compaction (issue #40), DB-gated only (a scripted `Llm`, same
-//! pattern as `tests/assistant_session_subagent_*.rs` — no live Ollama
-//! needed for a deterministic response). Two acceptance criteria:
+//! Context compaction (issue #40), backed by a scripted `Llm` (same pattern as
+//! `tests/assistant_session_subagent_*.rs` — a deterministic response with no
+//! real provider). Two acceptance criteria:
+//!
+//! Both are hermetic, but by different means. `POST .../compact`
+//! (`src/ai/handlers/sessions/compact.rs`) deliberately re-pins the source
+//! session to the model resolved out of `assistant_sessions.model_id` via
+//! `InMsg::SetModel` *before* running the summarize oneshot — correct
+//! production behavior (the summary must run under the session's chosen
+//! model), but it rebinds that one turn off `EngineConfig.llm_factory` (this
+//! fixture's scripted backend) and onto whatever `SiteCatalog`'s
+//! `build_factory` produced for the catalog row, which is always a real HTTP
+//! client. `manual_compact_*` therefore gives that row a `base_url` pointing
+//! at `common::llm_mock`'s in-process OpenAI-compat SSE endpoint instead of
+//! trying to dodge the re-pin: the catalog resolve → `SetModel` → real
+//! chat-completions wire format all run for real, against loopback. Only the
+//! summarize turn goes there; every other turn (the seed prompt, the
+//! successor's first turn, which the engine starts before any `SetModel` can
+//! land on a session id that didn't exist yet) still runs on the scripted
+//! `Llm`, which is what keeps `REPLY_MARKER` meaningful.
 //!
 //! - `overflow_auto_summarizes_instead_of_pruning`: a tiny `context_window`
 //!   (from a throwaway `llm_models` row, `setup_scripted_with_context_window`)
@@ -17,6 +34,8 @@
 //!   (not the now-retired source).
 
 mod common;
+#[path = "common/llm_mock.rs"]
+mod llm_mock;
 #[path = "common/scripted.rs"]
 mod scripted;
 
@@ -27,9 +46,10 @@ use axum::http::StatusCode;
 use common::{send, test_db_url};
 use entanglement_core::{Llm, LlmRequest, LlmResponse, LlmStream, OutEvent, stream_from_response};
 use entanglement_runtime::session_store::LogPayload;
+use llm_mock::spawn_openai_sse_mock;
 use scripted::{
-    ScriptedFixture, scripted_cleanup, scripted_session_with_model,
-    setup_scripted_with_context_window,
+    ScriptedFixture, scripted_cleanup, scripted_session, scripted_session_with_model,
+    setup_scripted_with_catalog_model, setup_scripted_with_context_window,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::json;
@@ -66,6 +86,13 @@ impl Llm for OverflowScriptedLlm {
     }
 }
 
+/// What the mocked catalog endpoint answers the summarize oneshot with. The
+/// scripted backend below deliberately answers a summarize request with
+/// something *else*, so an assertion on `SUMMARY_MARKER` also proves the
+/// handler's `SetModel` re-pin actually moved that turn onto the DB-resolved
+/// model rather than leaving it on `EngineConfig.llm_factory`.
+const MOCK_SUMMARY: &str = "SUMMARY_MARKER: user pinged, agent ponged.";
+
 #[derive(Default)]
 struct CompactScriptedLlm {
     calls: u32,
@@ -77,7 +104,7 @@ impl Llm for CompactScriptedLlm {
         self.calls += 1;
         let resp = if req.system.contains("summarization assistant") {
             LlmResponse {
-                text: "SUMMARY_MARKER: user pinged, agent ponged.".into(),
+                text: "SCRIPTED_FALLBACK: the compact re-pin did not take effect".into(),
                 tool_calls: vec![],
             }
         } else {
@@ -130,14 +157,19 @@ async fn overflow_auto_summarizes_instead_of_pruning() {
     // tail (3 messages, ~95 tokens) fit comfortably under the same 170-token
     // budget the summarizer itself checks against, so `summarize` succeeds
     // instead of refusing with `TranscriptTooLarge`/`TailTooLarge`.
-    let (fx, provider_id, model_id) = setup_scripted_with_context_window(
+    // No `scripted_session_with_model` here: this test never exercises a route
+    // that resolves the session's model back out of the DB, and the fixture's
+    // catalog row is gone by the time it returns (see
+    // `setup_scripted_with_context_window`'s doc) — all this test needs from it
+    // is the 200-token window now frozen into `EngineConfig`.
+    let fx = setup_scripted_with_context_window(
         &db_url,
         "overflow",
         std::sync::Arc::new(|| Box::new(OverflowScriptedLlm) as Box<dyn Llm>),
         200,
     )
     .await;
-    let (session_db_id, engine_session_id) = scripted_session_with_model(&fx, model_id).await;
+    let (session_db_id, engine_session_id) = scripted_session(&fx).await;
 
     for turn in 1..=4 {
         let (status, resp) = send(
@@ -180,9 +212,6 @@ async fn overflow_auto_summarizes_instead_of_pruning() {
     // "auto-summarized" from "silently pruned" for this test.
 
     scripted_cleanup(&fx, session_db_id).await;
-    let _ = llm_provider::Entity::delete_by_id(provider_id)
-        .exec(&fx.db)
-        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -192,13 +221,20 @@ async fn manual_compact_forks_a_successor_and_retires_the_source() {
         return;
     };
 
+    // The catalog row the session pins to answers on loopback, so the
+    // handler's pre-summarize `SetModel` re-pin (see the module doc) resolves
+    // to a real `OpenAiLlm` talking to an in-process endpoint instead of a
+    // provider that would need `scripted` to be a pulled model.
+    let mock = spawn_openai_sse_mock(MOCK_SUMMARY, Duration::from_millis(0)).await;
+
     // A generous window — this test is about the fork/retire mechanics, not
     // budget arithmetic (that's `overflow_auto_summarizes_instead_of_pruning`).
-    let (fx, provider_id, model_id) = setup_scripted_with_context_window(
+    let (fx, provider_id, model_id) = setup_scripted_with_catalog_model(
         &db_url,
         "manual-compact",
         std::sync::Arc::new(|| Box::new(CompactScriptedLlm::default()) as Box<dyn Llm>),
         200_000,
+        mock.base_url.clone(),
     )
     .await;
     let (session_db_id, source_session_id) = scripted_session_with_model(&fx, model_id).await;

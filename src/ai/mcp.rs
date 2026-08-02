@@ -23,6 +23,11 @@
 //! *other* currently-cached user still has, unregisters it too — call it
 //! after mcp-server CRUD (`ai::handlers::mcp_servers`) changes a row out from
 //! under the cache.
+//!
+//! The connection plumbing itself — the endpoint-pool client each connect
+//! rides (with the pool's request pacing deliberately switched off) and the
+//! timeouts bounding a handshake and a `tools/list` — lives in
+//! [`transport`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
@@ -33,7 +38,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use entanglement_core::{SessionId, ToolSpec};
 use entanglement_provider::ContentPart;
-use entanglement_runtime::mcp::{HttpClient, McpClient};
+use entanglement_runtime::mcp::McpClient;
 use entanglement_runtime::{SharedRegistry, Tool};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde_json::Value;
@@ -43,32 +48,11 @@ use crate::ai::engine::user_id_from_session;
 use crate::entity::user_mcp_server;
 use crate::repo::tokens;
 
+mod transport;
+
+use transport::{CONNECT_TIMEOUT, LIST_TOOLS_TIMEOUT, bounded, connect_with_timeout};
+
 const CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Ceiling on one remote MCP server's `connect()` handshake (TCP connect +
-/// `initialize` + `notifications/initialized`). Without this, a single
-/// unresponsive server can stall `routes_for_user` for as long as the
-/// underlying HTTP client's own per-request timeout (up to ~2 minutes across
-/// the handshake's two round-trips). See issue #28.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// `HttpClient::connect`, bounded to `timeout_duration` — see [`CONNECT_TIMEOUT`]'s
-/// doc. A parameter (not just the constant baked in) so a test can prove the
-/// bound actually applies without waiting out the real production timeout.
-async fn connect_with_timeout(
-    server: &str,
-    url: &str,
-    headers: &HashMap<String, String>,
-    timeout_duration: Duration,
-) -> anyhow::Result<HttpClient> {
-    match tokio::time::timeout(timeout_duration, HttpClient::connect(server, url, headers)).await {
-        Ok(result) => result,
-        Err(_) => anyhow::bail!(
-            "MCP server `{server}` timed out connecting after {}s",
-            timeout_duration.as_secs_f64()
-        ),
-    }
-}
 
 struct McpRoute {
     client: Arc<McpClient>,
@@ -186,7 +170,14 @@ impl SiteMcp {
                     continue;
                 }
             };
-            let defs = match client.list_tools().await {
+            let listing = client.clone();
+            let defs = match bounded(
+                LIST_TOOLS_TIMEOUT,
+                format!("MCP server `{}` tools/list", row.name),
+                async move { listing.list_tools().await },
+            )
+            .await
+            {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(server = %row.name, error = %e, "failed to list tools from user MCP server");
@@ -323,50 +314,4 @@ impl Tool for McpRoutedTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::net::TcpListener;
-
-    /// A remote MCP server that accepts the TCP connection but never answers
-    /// — the boot-latency failure mode issue #28 calls out. Proves
-    /// `connect_with_timeout` returns in bounded time instead of hanging for
-    /// as long as the underlying HTTP client's own (much longer) per-request
-    /// timeout.
-    #[tokio::test]
-    async fn connect_with_timeout_bounds_a_server_that_never_answers() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local_addr");
-        tokio::spawn(async move {
-            // Accept and hold every connection open without ever writing a
-            // response — a black hole, not a refusal.
-            loop {
-                let Ok((socket, _)) = listener.accept().await else {
-                    break;
-                };
-                std::mem::forget(socket); // keep the fd open for the test's duration
-            }
-        });
-
-        let bound = Duration::from_millis(200);
-        let started = tokio::time::Instant::now();
-        let result = connect_with_timeout(
-            "black-hole",
-            &format!("http://{addr}/mcp"),
-            &HashMap::new(),
-            bound,
-        )
-        .await;
-        let elapsed = started.elapsed();
-
-        assert!(
-            result.is_err(),
-            "a server that never answers must not connect"
-        );
-        assert!(
-            elapsed < bound * 5,
-            "connect_with_timeout took {elapsed:?}, expected roughly the {bound:?} bound"
-        );
-    }
-}
+mod tests;

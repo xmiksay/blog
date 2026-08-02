@@ -41,7 +41,7 @@ src/
     llm_{provider,model},
     assistant_{session,event},
     user_mcp_server, tool_permission
-  migration/              # m_001 … m_030
+  migration/              # m_001 … m_031
   ai/                     # config, handlers, tool_permissions, ws_bridge —
                           # plus the entanglement-core/-runtime engine
                           # adapters: engine, catalog, mcp, persistence,
@@ -140,6 +140,11 @@ assistant_sessions  id, user_id, title, provider/model snapshots, model_id?,
                     SessionId string, "u{user_id}:{uuid}"; nullable since
                     pre-engine-swap rows never get one back; repointed to a
                     fresh successor session id by a manual /compact, #40),
+                    — note m_031 emptied this table and assistant_events for
+                    the 0.6 upgrade (#97): assistant history is disposable and
+                    `assistant_events.payload` is a serialized third-party
+                    enum both readers hard-error on, so the bump purged rather
+                    than shimmed, the same call m_023 made —
                     temperature?, reasoning_effort? (m_027), max_output_tokens?,
                     thinking_budget_tokens? (m_028) — session-level
                     `GenerationParams` overrides, #42; `None` leaves that knob
@@ -273,7 +278,8 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   placeholder-prune. `EngineConfig.context_window` is seeded from the
   catalog's default model (`catalog.default_model()`) so a freshly-spawned
   session budgets sensibly before any `SetModel` narrows it to the session's
-  actual pinned model. Three submodules (kept under the 400-line cap):
+  actual pinned model — which is why that default must resolve
+  deterministically (see `catalog.rs` below). Three submodules (kept under the 400-line cap):
   `engine/profiles.rs` (the `researcher`/`page-writer` profile roster, below),
   `engine/session_tree.rs`
   (`root_session_of`/`user_id_from_session`/`user_id_from_session_awaiting`,
@@ -316,7 +322,7 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
     a few times to close a TOCTOU window: `SESSION_PARENTS` is written by this
     watcher's own `holly.subscribe()`r, an independent broadcast subscriber
     racing against whoever else needs the same child's link. Reassessed for
-    #43 against entanglement 0.4.0's cascading `resume` (ADR-0112, which
+    #43 against entanglement 0.6.0's cascading `resume` (ADR-0112, which
     re-materializes a root's whole spawn sub-tree and re-announces each
     child's `SessionStarted` exactly like a live spawn): this cache's resume
     population needs no extra code — the same generic watcher already covers
@@ -326,7 +332,17 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
     retry is a library-guaranteed problem this site can drop.
 - `catalog.rs` — `SiteCatalog`: builds `entanglement_provider::LlmFactory`/
   `ModelResolver` closures from `llm_providers`/`llm_models`; `refresh()` is
-  called after provider/model CRUD. `ModelResolver` populates
+  called after provider/model CRUD. The per-provider-`kind` factory dispatch
+  itself lives in `src/ai/catalog/factory.rs` (`build_factory`,
+  `ollama_base_url`, the `positive_u32`/`positive_usize` clamps), split out to
+  keep `catalog.rs` under the 400-line cap. `refresh()` reads `llm_models`
+  **`ORDER BY id`** and picks the engine-wide default through
+  `choose_default_model_id`: the lowest-id row flagged `is_default`, else the
+  lowest id overall. `llm_models` has no single-default constraint and
+  Postgres' physical row order is not stable (an `UPDATE` relocates a row), so
+  without that both the flagged scan and the unflagged fallback would re-decide
+  the default on every restart — and with it `EngineConfig.context_window` for
+  every fresh session. `ModelResolver` populates
   `ResolvedModel::context_window` from each model row's own `context_window`
   (#40), so a live `SetModel`/session resume budgets the turn loop's
   overflow handling against the model's real window instead of the engine's
@@ -376,7 +392,23 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   servers a user has configured (`user_mcp_servers`), as opposed to the `POST
   /mcp` route below where the site itself *serves* MCP. Tools are named
   `"{server}__{tool}"`. Connecting to a user's server is bounded by a 10s
-  `CONNECT_TIMEOUT` (issue #28). Holds the same `SharedRegistry` handle
+  `CONNECT_TIMEOUT`, listing its tools by a 10s `LIST_TOOLS_TIMEOUT` (issue
+  #28); both live in the `mcp/transport.rs` submodule alongside the pool
+  client. Since entanglement 0.6 (#97) the streamable-
+  HTTP transport lives in `entanglement-provider::mcp` (ADR-0153) and
+  `connect` takes the provider's own `HttpClient`, so MCP calls ride the same
+  per-endpoint pool as LLM traffic — retry schedule, concurrency cap
+  and 429/`Retry-After` cool-down (ADR-0157). The pool's *request pacing* is
+  deliberately disabled for MCP: `transport::mcp_pool_client` builds it with
+  `RetryConfig { rpm: MCP_ENDPOINT_RPM, ..default }`, an unreachable 60 000
+  rpm, because the default 50 rpm (1.2s between requests to one endpoint,
+  ~2.4s to reach `tools/list`, per server, sequentially, per cache refresh) is
+  calibrated for a rate-limited LLM API, not for a user's own servers — LLM
+  traffic in `catalog.rs` keeps the defaults. Because each endpoint's pool
+  state is a `.state`/`.lock` pair on disk that nothing else evicts,
+  `state.rs::create_state` runs a best-effort `prune_stale` sweep
+  (`prune_endpoint_state`) at startup — idle >1h and provably dead pairs only,
+  logged, never fatal. Holds the same `SharedRegistry` handle
   `engine.rs` wraps at spawn (issue #38): every time `routes_for_user`
   (re)connects a user's servers — a cold cache or a 60s TTL expiry —
   `register_routes` registers each newly discovered `"{server}__{tool}"`
@@ -399,7 +431,7 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   instead of every future `ensure_live` failing. `resume_session` passes
   `assistant_events`' whole root file (root + any sub-agent children, since
   they share one `root_session_id`) to `Holly::resume` in one call —
-  entanglement 0.4.0's `resume` cascades over the *whole* spawn sub-tree
+  entanglement 0.6.0's `resume` cascades over the *whole* spawn sub-tree
   itself (ADR-0112), re-materializing a child that was still live as of where
   the log stopped, so no per-child loop is needed here.
   `handlers/sessions/turn/collect.rs`'s `send_and_collect` builds its own response
@@ -426,7 +458,8 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   own child, so log order between them doesn't matter). `content.is_error` on
   a `tool_result` is a text-prefix heuristic (`looks_like_tool_error`), not a
   structural flag — `OutEvent::ToolOutput` carries none, re-checked against
-  entanglement-core 0.4.0 for #43/#87 and still true.
+  entanglement-core 0.6.0 for #43/#87/#97 and still true (0.6 added a
+  multimodal `content: Vec<ContentPart>` to it, but no error flag).
 - `tools/` — the built-in (non-MCP) tool vocabulary, ported to
   `entanglement_runtime::tools::Tool`. A curated subset of the site API (not
   full CRUD): pages `read`/`search`/`edit`/`delete`, tags `list`/`create`,

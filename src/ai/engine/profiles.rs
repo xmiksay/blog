@@ -120,6 +120,10 @@ fn sub_agent_profile(name: &str, description: &str, tools: &[&str]) -> AgentProf
         disallowed_tools: Vec::new(),
         can_spawn: Some(false),
         spawnable_agents: None,
+        // `None` inherits the executor's `SandboxConfig` base (engine.rs wires
+        // `SandboxConfig::none()`), which is this site's unconfined status quo —
+        // the sandbox only governs `bash`/`call`, neither of which is registered.
+        sandbox: None,
     }
 }
 

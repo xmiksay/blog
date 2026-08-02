@@ -124,6 +124,10 @@ pub async fn compact(
         predecessor: Some(source.clone()),
         agent: ROOT_PROFILE.to_string(),
         prompt: summary.clone(),
+        // Multi-user mode (0.6, ADR-0147) is not adopted here — the site keys
+        // its own `u{user_id}:{uuid}` session ids instead. Ignored anyway: a
+        // `predecessor: Some(_)` spawn inherits its predecessor's user.
+        user: None,
     };
     let mut collected = send_and_collect(engine, &successor, vec![spawn], Vec::new()).await?;
     engine.mark_live(successor.clone());

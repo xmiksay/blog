@@ -8,7 +8,9 @@
 //! unavailable so `cargo test`/`make verify` stays green in an environment
 //! without them:
 //! - `DATABASE_URL` unset -> skip (same convention as `tests/policy_db.rs`).
-//! - `http://localhost:11434` unreachable -> skip (no local Ollama).
+//! - `http://localhost:11434` not serving `MODEL` -> skip (no usable local
+//!   Ollama). Note this is a check for the *model*, not merely for the daemon
+//!   — see `ollama_serves_model`.
 //!
 //! The #17 sub-agent flows (DB-gated only, no live model needed) live in the
 //! sibling `tests/assistant_session_subagent.rs`; shared setup helpers live in
@@ -31,17 +33,40 @@ use site::state::{self, AppState};
 const OLLAMA_BASE: &str = "http://localhost:11434";
 const MODEL: &str = "qwen3.5:9b";
 
-async fn ollama_reachable() -> bool {
+/// Whether a local Ollama is up **and has actually pulled [`MODEL`]**.
+///
+/// Daemon liveness alone is the wrong gate: a running `ollama serve` with
+/// nothing pulled answers `/api/tags` with `200 {"models":[]}`, sails straight
+/// past a reachability-only check, and then fails every turn with
+/// `openai-compat HTTP 404: model '<MODEL>' not found` — i.e. a missing
+/// environment dependency surfacing as a product failure at the
+/// `assistant_tool_call` assertion far below, which is precisely what the
+/// module doc's "skipped gracefully (not failed) when unavailable" contract
+/// exists to prevent. `/api/tags` reports each model under both `name` and
+/// `model`; Ollama also normalizes a bare tag-less name to `:latest`, so
+/// accept that spelling too.
+async fn ollama_serves_model() -> bool {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
         .expect("build reqwest client");
-    client
-        .get(format!("{OLLAMA_BASE}/api/tags"))
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    let Ok(resp) = client.get(format!("{OLLAMA_BASE}/api/tags")).send().await else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let Ok(tags) = resp.json::<Value>().await else {
+        return false;
+    };
+    let latest = format!("{MODEL}:latest");
+    tags["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|m| [m["name"].as_str(), m["model"].as_str()])
+        .flatten()
+        .any(|n| n == MODEL || n == latest)
 }
 
 /// Build a throwaway logged-in user (row + valid session token) and the app
@@ -184,8 +209,8 @@ async fn create_session_then_message_then_approve_completes_the_turn() {
         eprintln!("skipping: DATABASE_URL not set");
         return;
     };
-    if !ollama_reachable().await {
-        eprintln!("skipping: {OLLAMA_BASE} not reachable");
+    if !ollama_serves_model().await {
+        eprintln!("skipping: {OLLAMA_BASE} does not serve {MODEL}");
         return;
     }
 

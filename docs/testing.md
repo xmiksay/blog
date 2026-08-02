@@ -151,6 +151,14 @@ executes on every PR rather than self-skipping.
   of what's exercised) plus, against a real fake MCP server, that the shared
   dispatch registry reflects an add/remove live and a tool becomes callable
   mid-session once its server is discovered (issue #38, no executor restart).
+  `ai_catalog.rs`'s endpoint-throttle cases point a provider row at
+  `tests/common/llm_mock.rs` — a minimal in-process OpenAI-compatible SSE
+  endpoint (`spawn_openai_sse_mock(reply, delay)` → `OpenAiMock { base_url,
+  max_in_flight }`, `#[path]`-included). Reach for it whenever a test needs
+  the *catalog-built* client (`build_factory` → `entanglement_provider`'s real
+  `OpenAiLlm`) rather than a scripted `Llm`: it keeps the real wire format in
+  the loop with no network and no pulled model. `tests/assistant_session_
+  compact.rs` is its second consumer, which is why it lives in `common/`.
 - `tests/export_assets.rs`, `tests/export_bridge.rs`, `tests/export_routes.rs`
   — the mdcast export subsystem (#63–#68): `DbAssetProvider`'s
   content-addressed `file_blobs` resolution, the `render_for_export`
@@ -217,7 +225,12 @@ executes on every PR rather than self-skipping.
   - `tests/assistant_session_compact.rs` (#40) — context compaction via a
     scripted `Llm`: overflow auto-summarizes (emits `Compacted { auto: true }`)
     instead of silently pruning, and manual `POST .../compact` forks a
-    successor engine session and retires the source.
+    successor engine session and retires the source. The manual case needs
+    both backends at once: `POST .../compact` re-pins the source with
+    `InMsg::SetModel` before summarizing, which deliberately takes that one
+    turn off the scripted override and onto a catalog-built (always real HTTP)
+    client — so its fixture row's `base_url` points at
+    `tests/common/llm_mock.rs` (below) and only the summarize turn goes there.
   - `tests/assistant_session_generation.rs` (#42) — live
     `SetModel`/`SetAgent`/`SetGeneration` switching through the real HTTP
     API; rebind-only, so no live LLM backend is needed.

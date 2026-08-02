@@ -9,7 +9,7 @@ use entanglement_provider::{GEMINI_BASE, HttpClient};
 
 use crate::entity::llm_provider;
 
-use super::{SiteCatalog, ollama_base_url};
+use super::{SiteCatalog, factory::ollama_base_url};
 
 /// Mirrors `entanglement_provider::client`'s own private `DEFAULT_CONCURRENCY`
 /// (currently `3`), purely for display when a provider has no configured

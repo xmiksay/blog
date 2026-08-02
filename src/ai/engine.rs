@@ -289,6 +289,12 @@ impl SiteEngine {
             grants,
             Hooks::default(),
             None,
+            // 0.6's per-profile bubblewrap confinement (#479, ADR-0134) only
+            // ever applies to `bash`/`call`; this site registers neither, so
+            // the unconfined variant is the one that keeps behavior identical
+            // (and avoids `from_env()` letting an ambient `ENTANGLEMENT_SANDBOX`
+            // change how the server runs).
+            entanglement_runtime::policy::SandboxConfig::none(),
         );
 
         let sink: Arc<dyn entanglement_runtime::persistence::RecordSink> =

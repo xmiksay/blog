@@ -15,6 +15,13 @@ import type { AssistantSessionDetail, LiveSubAgentTurn, LiveToolCall, LiveTurn }
 // Split out of `stores/assistant.ts` (which calls this once from its setup
 // body) to keep that file under the project's line cap — folding the WS
 // event stream is a distinct concern from session/CRUD management.
+// `AgentState` values that mean a turn is still running. entanglement 0.6
+// added `working` (a tool is executing, ADR-0139) and `waiting_agent` (parked
+// on a blocking sub-agent) beside the two 0.4 emitted; a state missing here
+// leaves the composer enabled mid-turn. `paused` is deliberately absent — the
+// site never sends `PauseSession`, so it cannot occur.
+const IN_FLIGHT_STATES = ['thinking', 'working', 'waiting_approval', 'waiting_agent']
+
 export function useLiveTurns(
   current: Ref<AssistantSessionDetail | null>,
   sending: Ref<boolean>,
@@ -182,10 +189,7 @@ export function useLiveTurns(
 
     switch (envelope.event) {
       case 'status':
-        if (
-          (payload.state === 'thinking' || payload.state === 'waiting_approval') &&
-          current.value?.id === sessionId
-        ) {
+        if (IN_FLIGHT_STATES.includes(payload.state as string) && current.value?.id === sessionId) {
           sending.value = true
         }
         break

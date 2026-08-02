@@ -1,8 +1,48 @@
 //! Unit tests for `src/ai/catalog.rs`, split out to keep that file under the
 //! 400-line cap.
 
+use super::test_fixtures::{model_row, provider, provider_with_limits};
 use super::*;
+use entanglement_provider::{GEMINI_BASE, OLLAMA_BASE};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Two rows flagged `is_default` is a legal catalog — `llm_models` has no
+/// single-default constraint — and an unordered Postgres scan can hand
+/// `refresh()` those rows in either order (an `UPDATE` alone relocates a row
+/// in the heap). Whichever order they arrive in, the same id must win, or a
+/// plain server restart silently re-seeds `EngineConfig.context_window` from
+/// a different model.
+#[test]
+fn two_flagged_rows_resolve_to_the_lowest_id_whatever_the_scan_order() {
+    let ascending = [model_row(3, true), model_row(7, true)];
+    let descending = [model_row(7, true), model_row(3, true)];
+    assert_eq!(choose_default_model_id(&[3, 7], &ascending), Some(3));
+    assert_eq!(choose_default_model_id(&[7, 3], &descending), Some(3));
+}
+
+/// The `first()`-fallback path (no row flagged at all) needs the same
+/// guarantee — it used to hand back whichever row the scan happened to
+/// return first.
+#[test]
+fn the_unflagged_fallback_is_the_lowest_id_whatever_the_scan_order() {
+    let ascending = [model_row(4, false), model_row(9, false)];
+    let descending = [model_row(9, false), model_row(4, false)];
+    assert_eq!(choose_default_model_id(&[], &ascending), Some(4));
+    assert_eq!(choose_default_model_id(&[], &descending), Some(4));
+}
+
+/// A single flagged row — what the admin UI actually produces — must still
+/// resolve to exactly that row, even when it is not the lowest id present.
+#[test]
+fn one_flagged_row_wins_over_lower_unflagged_ids() {
+    let models = [model_row(1, false), model_row(5, true)];
+    assert_eq!(choose_default_model_id(&[5], &models), Some(5));
+}
+
+#[test]
+fn an_empty_catalog_has_no_default() {
+    assert_eq!(choose_default_model_id(&[], &[]), None);
+}
 
 /// The exact lock type `SiteCatalog.inner` uses. A `std::sync::RwLock`
 /// would poison here — this proves `parking_lot::RwLock` doesn't, so one
@@ -24,136 +64,6 @@ fn panicking_while_holding_the_write_lock_does_not_poison_it() {
     let inner = lock.read();
     assert!(inner.by_model_id.is_empty());
     assert!(inner.default_model_id.is_none());
-}
-
-fn provider(kind: &str, api_key: Option<&str>, base_url: Option<&str>) -> llm_provider::Model {
-    provider_with_limits(kind, api_key, base_url, None, None)
-}
-
-fn provider_with_limits(
-    kind: &str,
-    api_key: Option<&str>,
-    base_url: Option<&str>,
-    concurrency: Option<i32>,
-    rpm: Option<i32>,
-) -> llm_provider::Model {
-    llm_provider::Model {
-        id: 1,
-        label: "test-provider".to_string(),
-        kind: kind.to_string(),
-        api_key: api_key.map(str::to_string),
-        base_url: base_url.map(str::to_string),
-        concurrency,
-        rpm,
-        created_at: chrono::Utc::now().fixed_offset(),
-    }
-}
-
-#[test]
-fn ollama_without_base_url_falls_back_to_default() {
-    let p = provider("ollama", None, None);
-    assert_eq!(ollama_base_url(&p), OLLAMA_BASE);
-    assert!(build_factory(&p, "model", &HttpClient::new()).is_ok());
-}
-
-#[test]
-fn ollama_with_blank_base_url_falls_back_to_default() {
-    let p = provider("ollama", None, Some(""));
-    assert_eq!(ollama_base_url(&p), OLLAMA_BASE);
-}
-
-#[test]
-fn ollama_with_base_url_uses_it() {
-    let p = provider("ollama", None, Some("http://example.internal:1234/v1"));
-    assert_eq!(ollama_base_url(&p), "http://example.internal:1234/v1");
-}
-
-#[test]
-fn anthropic_without_api_key_errs() {
-    let p = provider("anthropic", None, None);
-    let err = build_factory(&p, "model", &HttpClient::new())
-        .err()
-        .expect("expected build_factory to fail");
-    assert!(err.to_string().contains("no api_key"));
-}
-
-#[test]
-fn anthropic_with_api_key_builds_ok() {
-    let p = provider("anthropic", Some("key"), None);
-    assert!(build_factory(&p, "model", &HttpClient::new()).is_ok());
-}
-
-#[test]
-fn gemini_without_api_key_errs() {
-    let p = provider("gemini", None, None);
-    let err = build_factory(&p, "model", &HttpClient::new())
-        .err()
-        .expect("expected build_factory to fail");
-    assert!(err.to_string().contains("no api_key"));
-}
-
-#[test]
-fn gemini_with_api_key_builds_ok() {
-    let p = provider("gemini", Some("key"), None);
-    assert!(build_factory(&p, "model", &HttpClient::new()).is_ok());
-}
-
-#[test]
-fn openai_without_base_url_errs() {
-    let p = provider("openai", Some("key"), None);
-    let err = build_factory(&p, "model", &HttpClient::new())
-        .err()
-        .expect("expected build_factory to fail");
-    assert!(err.to_string().contains("no base_url"));
-}
-
-#[test]
-fn openai_with_base_url_and_no_key_builds_ok() {
-    let p = provider("openai", None, Some("http://example.internal:1234/v1"));
-    assert!(build_factory(&p, "model", &HttpClient::new()).is_ok());
-}
-
-#[test]
-fn openai_with_base_url_and_key_builds_ok() {
-    let p = provider(
-        "openai",
-        Some("key"),
-        Some("http://example.internal:1234/v1"),
-    );
-    assert!(build_factory(&p, "model", &HttpClient::new()).is_ok());
-}
-
-#[test]
-fn unsupported_kind_errs_naming_it() {
-    let p = provider("mystery", None, None);
-    let err = build_factory(&p, "model", &HttpClient::new())
-        .err()
-        .expect("expected build_factory to fail");
-    assert!(err.to_string().contains("mystery"));
-}
-
-#[test]
-fn positive_u32_passes_through_a_positive_value() {
-    assert_eq!(positive_u32(Some(30)), Some(30));
-}
-
-#[test]
-fn positive_u32_treats_zero_or_negative_as_unset() {
-    assert_eq!(positive_u32(Some(0)), None);
-    assert_eq!(positive_u32(Some(-1)), None);
-    assert_eq!(positive_u32(None), None);
-}
-
-#[test]
-fn positive_usize_passes_through_a_positive_value() {
-    assert_eq!(positive_usize(Some(2)), Some(2));
-}
-
-#[test]
-fn positive_usize_treats_zero_or_negative_as_unset() {
-    assert_eq!(positive_usize(Some(0)), None);
-    assert_eq!(positive_usize(Some(-5)), None);
-    assert_eq!(positive_usize(None), None);
 }
 
 /// A minimal OpenAI-compat SSE mock: accepts a connection, tracks how many
@@ -223,7 +133,7 @@ async fn spawn_concurrency_probe(delay: std::time::Duration) -> (String, Arc<Ato
 #[tokio::test]
 async fn concurrency_capped_provider_serializes_concurrent_turns() {
     let (base_url, max_seen) = spawn_concurrency_probe(std::time::Duration::from_millis(150)).await;
-    let http = HttpClient::new();
+    let http = HttpClient::new().expect("test HTTP client");
     let p = provider_with_limits("ollama", None, Some(&base_url), Some(1), Some(1_000_000));
     let factory = build_factory(&p, "model", &http).expect("build factory");
 
@@ -300,7 +210,7 @@ async fn drive_one_stream(factory: &LlmFactory) {
 async fn dynamic_default_factory_tracks_the_current_default_across_refresh() {
     let (url_a, hits_a) = spawn_concurrency_probe(std::time::Duration::from_millis(10)).await;
     let (url_b, hits_b) = spawn_concurrency_probe(std::time::Duration::from_millis(10)).await;
-    let http = HttpClient::new();
+    let http = HttpClient::new().expect("test HTTP client");
 
     let catalog = Arc::new(SiteCatalog::new_for_test(CatalogInner {
         by_model_id: HashMap::from([
@@ -379,7 +289,7 @@ fn throttle_statuses_reports_idle_providers_sorted_by_id() {
                 ProviderHandle {
                     endpoint: "http://b.internal".to_string(),
                     cap: 5,
-                    http: HttpClient::new(),
+                    http: HttpClient::new().expect("test HTTP client"),
                 },
             ),
             (
@@ -387,7 +297,7 @@ fn throttle_statuses_reports_idle_providers_sorted_by_id() {
                 ProviderHandle {
                     endpoint: "http://a.internal".to_string(),
                     cap: DEFAULT_CONCURRENCY_FALLBACK,
-                    http: HttpClient::new(),
+                    http: HttpClient::new().expect("test HTTP client"),
                 },
             ),
         ]),
@@ -422,7 +332,7 @@ fn throttle_statuses_reports_idle_providers_sorted_by_id() {
 async fn throttle_statuses_reflects_a_live_in_flight_request() {
     let (base_url, _max_seen) =
         spawn_concurrency_probe(std::time::Duration::from_millis(300)).await;
-    let busy_http = HttpClient::new();
+    let busy_http = HttpClient::new().expect("test HTTP client");
     let p = provider_with_limits("ollama", None, Some(&base_url), Some(1), Some(1_000_000));
     let factory = build_factory(&p, "model", &busy_http).expect("build factory");
 
@@ -441,7 +351,7 @@ async fn throttle_statuses_reflects_a_live_in_flight_request() {
                 ProviderHandle {
                     endpoint: "http://sibling.internal".to_string(),
                     cap: DEFAULT_CONCURRENCY_FALLBACK,
-                    http: HttpClient::new(),
+                    http: HttpClient::new().expect("test HTTP client"),
                 },
             ),
         ]),

@@ -15,13 +15,15 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use entanglement_provider::{
-    GEMINI_BASE, GenerationResolver, HttpClient, LlmFactory, ModelResolver, OLLAMA_BASE,
-    ResolvedModel, anthropic_factory, gemini_factory, openai_factory,
+    GenerationResolver, HttpClient, LlmFactory, ModelResolver, ResolvedModel, UserId,
 };
 use parking_lot::RwLock;
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 
 use crate::entity::{llm_model, llm_provider};
+
+mod factory;
+use factory::{build_factory, positive_u32, positive_usize};
 
 mod throttle;
 pub use throttle::ProviderThrottleStatus;
@@ -109,7 +111,13 @@ impl SiteCatalog {
             .all(&self.db)
             .await
             .context("loading llm_providers")?;
+        // Ordered, not incidental: Postgres returns an unordered scan in
+        // whatever physical order the heap happens to hold (an `UPDATE`
+        // relocates a row to the end), and this loop's outcome — which model
+        // ends up the engine-wide default, see `choose_default_model_id` —
+        // must not depend on that.
         let models = llm_model::Entity::find()
+            .order_by_asc(llm_model::Column::Id)
             .all(&self.db)
             .await
             .context("loading llm_models")?;
@@ -122,13 +130,14 @@ impl SiteCatalog {
                     endpoint: provider_endpoint_label(provider),
                     cap: positive_usize(provider.concurrency)
                         .unwrap_or(DEFAULT_CONCURRENCY_FALLBACK),
-                    http: HttpClient::new(),
+                    http: HttpClient::new()
+                        .with_context(|| format!("HTTP client for '{}'", provider.label))?,
                 },
             );
         }
 
         let mut by_model_id = HashMap::with_capacity(models.len());
-        let mut default_model_id = None;
+        let mut flagged_default_ids = Vec::new();
         for model in &models {
             let Some(provider) = providers.iter().find(|p| p.id == model.provider_id) else {
                 tracing::warn!(
@@ -150,7 +159,7 @@ impl SiteCatalog {
                 }
             };
             if model.is_default {
-                default_model_id = Some(model.id);
+                flagged_default_ids.push(model.id);
             }
             by_model_id.insert(
                 model.id,
@@ -168,11 +177,7 @@ impl SiteCatalog {
                 },
             );
         }
-        // First model row is the fallback default if none is flagged, mirroring
-        // `ProviderRegistry::resolve_default`.
-        if default_model_id.is_none() {
-            default_model_id = models.first().map(|m| m.id);
-        }
+        let default_model_id = choose_default_model_id(&flagged_default_ids, &models);
         *self.inner.write() = CatalogInner {
             by_model_id,
             default_model_id,
@@ -222,7 +227,13 @@ impl SiteCatalog {
     pub fn model_resolver(self: &Arc<Self>) -> ModelResolver {
         let catalog = self.clone();
         Arc::new(
-            move |provider: &str, model: &str| -> Result<ResolvedModel, String> {
+            // `_user` (0.6/ADR-0147) is ignored: the site never hands `Holly`
+            // a `UserId` — it keys sessions itself — so every resolve is
+            // against the one global `llm_models` table.
+            move |_user: Option<&UserId>,
+                  provider: &str,
+                  model: &str|
+                  -> Result<ResolvedModel, String> {
                 let model_id: i32 = model
                     .parse()
                     .map_err(|_| format!("model `{model}` is not a valid model id"))?;
@@ -261,102 +272,32 @@ impl SiteCatalog {
     }
 }
 
-/// Build the `LlmFactory` for one provider row, dispatching on `kind`.
+/// Which model id `refresh()` installs as the engine-wide default: `flagged`
+/// (the ids of the *buildable* rows carrying `is_default`) if any, else the
+/// lowest id in `all`, mirroring `ProviderRegistry::resolve_default`'s
+/// "first row wins" fallback now that the query is ordered by id.
 ///
-/// `provider.rpm`/`.concurrency` (ADR-0111) are threaded straight into the
-/// factory so the client's per-endpoint pacing gate and in-flight permit are
-/// sized from the DB row instead of the library's process-wide defaults —
-/// this is what serializes many spawned sub-agents against one provider's
-/// real limits instead of 429-storming it.
-fn build_factory(
-    provider: &llm_provider::Model,
-    default_model: &str,
-    http: &HttpClient,
-) -> anyhow::Result<LlmFactory> {
-    let rpm = positive_u32(provider.rpm);
-    let concurrency = positive_usize(provider.concurrency);
-    match provider.kind.as_str() {
-        "ollama" => Ok(openai_factory(
-            ollama_base_url(provider),
-            None,
-            default_model,
-            rpm,
-            concurrency,
-            None,
-            http.clone(),
-        )),
-        "anthropic" => {
-            let api_key = provider.api_key.clone().ok_or_else(|| {
-                anyhow::anyhow!("anthropic provider '{}' has no api_key", provider.label)
-            })?;
-            Ok(anthropic_factory(
-                api_key,
-                default_model,
-                rpm,
-                concurrency,
-                None,
-                http.clone(),
-            ))
-        }
-        "gemini" => {
-            let api_key = provider.api_key.clone().ok_or_else(|| {
-                anyhow::anyhow!("gemini provider '{}' has no api_key", provider.label)
-            })?;
-            Ok(gemini_factory(
-                GEMINI_BASE,
-                api_key,
-                default_model,
-                rpm,
-                concurrency,
-                http.clone(),
-            ))
-        }
-        "openai" => {
-            let base_url = provider
-                .base_url
-                .clone()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("openai provider '{}' has no base_url", provider.label)
-                })?;
-            Ok(openai_factory(
-                base_url,
-                provider.api_key.clone().filter(|s| !s.is_empty()),
-                default_model,
-                rpm,
-                concurrency,
-                None,
-                http.clone(),
-            ))
-        }
-        other => anyhow::bail!("provider kind not supported: {other}"),
-    }
+/// **Lowest id wins on both paths.** `llm_models` has no single-default
+/// constraint, so two flagged rows are a legal (if misconfigured) catalog, and
+/// nothing about Postgres' physical row order is stable — an `UPDATE` alone
+/// relocates a row. Ids, by contrast, are assigned once and never change, so
+/// `min` is the only tie-break that survives a restart, a `refresh()` after
+/// unrelated CRUD, or a table rewrite. That stability is load-bearing rather
+/// than cosmetic: `EngineConfig.context_window` is seeded from this choice
+/// (`engine.rs`), so an ambiguous catalog resolved by scan order would
+/// silently re-budget every fresh session on each restart. A catalog with
+/// exactly one flagged row — the configuration the admin UI produces —
+/// resolves to that row either way.
+fn choose_default_model_id(flagged: &[i32], all: &[llm_model::Model]) -> Option<i32> {
+    flagged
+        .iter()
+        .copied()
+        .min()
+        .or_else(|| all.iter().map(|m| m.id).min())
 }
 
-/// A DB-stored budget clamped to the factories' expected type. A non-positive
-/// value is treated as "unset" (falls back to the client's own default)
-/// rather than panicking on the cast or silently passing a zero-sized budget.
-fn positive_u32(v: Option<i32>) -> Option<u32> {
-    v.and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0)
-}
-
-/// See [`positive_u32`]; same clamp for the `usize` concurrency cap.
-fn positive_usize(v: Option<i32>) -> Option<usize> {
-    v.and_then(|n| usize::try_from(n).ok()).filter(|n| *n > 0)
-}
-
-/// Effective Ollama base URL for `provider`'s row: its own `base_url` unless
-/// unset/blank, else the default local endpoint. Split out from
-/// `build_factory` so the fallback is unit-testable without a network call
-/// (the resulting `LlmFactory` closure is opaque — there's no other way to
-/// observe which URL it captured).
-fn ollama_base_url(provider: &llm_provider::Model) -> String {
-    provider
-        .base_url
-        .clone()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| OLLAMA_BASE.to_string())
-}
+#[cfg(test)]
+mod test_fixtures;
 
 #[cfg(test)]
 impl SiteCatalog {

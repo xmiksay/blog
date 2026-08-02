@@ -17,17 +17,21 @@
 //! there's one site-wide catalog. `cargo test` runs test functions within a
 //! binary concurrently by default, so two of these tests running at once
 //! would race on which rows are visible when the other's `load` runs
-//! (concretely: whichever row is physically first in an unordered table scan
-//! decides the "no row flagged default" fallback). Serialize every test in
-//! this file with one process-wide lock instead of relying on data isolation
-//! that the code under test doesn't provide.
+//! (concretely: a sibling test's lower-id row would win the default). The
+//! resolution is deterministic (`catalog::choose_default_model_id`) but still
+//! table-wide, so serialize every test in this file with one process-wide
+//! lock instead of relying on data isolation the code under test doesn't
+//! provide.
+
+#[path = "common/llm_mock.rs"]
+mod llm_mock;
 
 use entanglement_provider::LlmRequest;
+use llm_mock::spawn_openai_sse_mock;
 use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, Set};
 use site::ai::catalog::SiteCatalog;
 use site::entity::{llm_model, llm_provider};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -133,9 +137,10 @@ async fn cleanup_provider(db: &DatabaseConnection, provider_id: i32) {
 /// `exclusive()` and before inserting this test's own fixture. Guards against
 /// more than just concurrent tests: if an *earlier* run of this file panicked
 /// after inserting rows but before its own `cleanup_provider` ran, those rows
-/// would otherwise sit in `site_test` (which isn't reset between runs) and
-/// silently decide `default_model()`'s unordered-scan-dependent fallback for
-/// every run after. Safe to wipe unconditionally — this file exclusively owns
+/// would otherwise sit in `site_test` (which isn't reset between runs) and,
+/// having lower ids than anything a later run inserts, silently win
+/// `default_model()` for every run after. Safe to wipe unconditionally — this
+/// file exclusively owns
 /// these two tables (see the module doc); no other test file's fixtures live
 /// here.
 async fn wipe_catalog_tables(db: &DatabaseConnection) {
@@ -187,6 +192,47 @@ async fn default_model_falls_back_to_first_row_when_none_flagged() {
     cleanup_provider(&db, provider.id).await;
 }
 
+/// `llm_models` has no single-default constraint, so two flagged rows are a
+/// legal (if misconfigured) catalog — and before the `ORDER BY`/`min` in
+/// `refresh` the winner was whichever the unordered scan happened to hand over
+/// last, i.e. re-decided on every restart. `EngineConfig.context_window` is
+/// seeded from it (`ai/engine.rs`), so the ambiguous case has to be pinned
+/// down: lowest id, always. The `UPDATE` below is the point — rewriting a row
+/// relocates it in the Postgres heap, so the two loads see the rows in
+/// opposite physical order and must still agree.
+#[tokio::test]
+async fn two_rows_flagged_default_always_resolve_to_the_lowest_id() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let _guard = exclusive().await;
+    wipe_catalog_tables(&db).await;
+    let provider = make_provider(&db, "two-defaults").await;
+    let lower = make_model(&db, provider.id, "model-a", true).await;
+    make_model(&db, provider.id, "model-b", true).await;
+
+    let catalog = SiteCatalog::load(db.clone()).await.expect("load catalog");
+    assert_eq!(
+        catalog.default_model().map(|m| m.model_id),
+        Some(lower.id),
+        "the lowest-id flagged row must win"
+    );
+
+    let mut active: llm_model::ActiveModel = lower.clone().into();
+    active.label = Set("relocated".to_string());
+    active.update(&db).await.expect("rewrite the lower-id row");
+
+    let catalog = SiteCatalog::load(db.clone()).await.expect("reload catalog");
+    assert_eq!(
+        catalog.default_model().map(|m| m.model_id),
+        Some(lower.id),
+        "the same row must win after its physical position moved"
+    );
+
+    cleanup_provider(&db, provider.id).await;
+}
+
 #[tokio::test]
 async fn model_by_id_finds_and_misses() {
     let Some(db) = test_db().await else {
@@ -218,7 +264,7 @@ async fn model_resolver_resolves_a_correct_provider_model_pair() {
 
     let catalog = SiteCatalog::load(db.clone()).await.expect("load catalog");
     let resolver = catalog.model_resolver();
-    let resolved = resolver(&provider.label, &model.id.to_string())
+    let resolved = resolver(None, &provider.label, &model.id.to_string())
         .expect("expected the matching provider/model pair to resolve");
     assert_eq!(resolved.provider, provider.label);
     assert_eq!(resolved.model, "model-a");
@@ -244,7 +290,7 @@ async fn model_resolver_populates_context_window_from_the_row() {
 
     let catalog = SiteCatalog::load(db.clone()).await.expect("load catalog");
     let resolver = catalog.model_resolver();
-    let resolved = resolver(&provider.label, &model.id.to_string())
+    let resolved = resolver(None, &provider.label, &model.id.to_string())
         .expect("expected the matching provider/model pair to resolve");
     assert_eq!(resolved.context_window, Some(128_000));
 
@@ -268,7 +314,7 @@ async fn model_resolver_leaves_context_window_none_when_unset() {
 
     let catalog = SiteCatalog::load(db.clone()).await.expect("load catalog");
     let resolver = catalog.model_resolver();
-    let resolved = resolver(&provider.label, &model.id.to_string())
+    let resolved = resolver(None, &provider.label, &model.id.to_string())
         .expect("expected the matching provider/model pair to resolve");
     assert_eq!(resolved.context_window, None);
 
@@ -288,7 +334,7 @@ async fn model_resolver_rejects_a_model_id_under_the_wrong_provider_label() {
 
     let catalog = SiteCatalog::load(db.clone()).await.expect("load catalog");
     let resolver = catalog.model_resolver();
-    let err = resolver("not-the-real-label", &model.id.to_string())
+    let err = resolver(None, "not-the-real-label", &model.id.to_string())
         .err()
         .expect("a real model id under the wrong provider label must be rejected");
     assert!(err.contains("not `not-the-real-label`") || err.contains("belongs to provider"));
@@ -309,7 +355,7 @@ async fn model_resolver_rejects_a_non_numeric_model_string() {
 
     let catalog = SiteCatalog::load(db.clone()).await.expect("load catalog");
     let resolver = catalog.model_resolver();
-    let err = resolver(&provider.label, "not-a-number")
+    let err = resolver(None, &provider.label, "not-a-number")
         .err()
         .expect("a non-numeric model string must be rejected");
     assert!(err.contains("not a valid model id"));
@@ -366,56 +412,6 @@ async fn catalog_leaves_concurrency_and_rpm_none_when_unset() {
     cleanup_provider(&db, provider.id).await;
 }
 
-/// A minimal OpenAI-compat SSE mock: accepts a connection, tracks how many
-/// are open at once (updating `max_seen`), holds the connection for `delay`
-/// before responding, then closes it. Mirrors the one in
-/// `src/ai/catalog/tests.rs` — duplicated rather than shared because an
-/// integration test binary can't reach that module's private helper.
-async fn spawn_concurrency_probe(delay: Duration) -> (String, Arc<AtomicUsize>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
-    let in_flight = Arc::new(AtomicUsize::new(0));
-    let max_seen = Arc::new(AtomicUsize::new(0));
-    let (in_flight, max_seen_task) = (in_flight, max_seen.clone());
-
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                break;
-            };
-            let in_flight = in_flight.clone();
-            let max_seen = max_seen_task.clone();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                let _ =
-                    tokio::time::timeout(Duration::from_millis(500), socket.read(&mut buf)).await;
-
-                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                max_seen.fetch_max(now, Ordering::SeqCst);
-                tokio::time::sleep(delay).await;
-                in_flight.fetch_sub(1, Ordering::SeqCst);
-
-                let body = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-                             data: [DONE]\n\n";
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.shutdown().await;
-            });
-        }
-    });
-
-    (format!("http://{addr}"), max_seen)
-}
-
 /// Drive one turn through `model_id`'s current `llm_factory` to completion.
 async fn fire_one_turn(catalog: &SiteCatalog, model_id: i32) {
     let mut llm = (catalog
@@ -454,7 +450,7 @@ async fn refresh_applies_an_updated_concurrency_cap_even_after_the_endpoint_alre
     let _guard = exclusive().await;
     wipe_catalog_tables(&db).await;
 
-    let (base_url, max_seen) = spawn_concurrency_probe(Duration::from_millis(150)).await;
+    let mock = spawn_openai_sse_mock("", Duration::from_millis(150)).await;
     // `rpm` is pinned high from the start so the (separate) adaptive pacing
     // gate can't itself space the 3 dispatches out — only the `concurrency`
     // semaphore we set *after* the endpoint has already served a request
@@ -466,7 +462,7 @@ async fn refresh_applies_an_updated_concurrency_cap_even_after_the_endpoint_alre
         )),
         kind: Set("ollama".to_string()),
         api_key: Set(None),
-        base_url: Set(Some(base_url)),
+        base_url: Set(Some(mock.base_url.clone())),
         rpm: Set(Some(1_000_000)),
         ..Default::default()
     }
@@ -504,7 +500,7 @@ async fn refresh_applies_an_updated_concurrency_cap_even_after_the_endpoint_alre
     }
 
     assert_eq!(
-        max_seen.load(Ordering::SeqCst),
+        mock.max_in_flight.load(Ordering::SeqCst),
         1,
         "the concurrency cap set after refresh() must actually bound in-flight requests"
     );

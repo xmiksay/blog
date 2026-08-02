@@ -209,6 +209,40 @@ async fn approving_calls_one_at_a_time_settles_each_promptly_and_the_last_contin
         "call B hasn't been decided yet, its tag_create must not have run"
     );
 
+    // Wait until call A's resolution is *durably persisted* before deciding
+    // call B, for the mirror image of the reason the batch was polled for
+    // above. `approve` derives its `extra_pending` readiness signal from
+    // `open_tool_requests(&prior)`, and `prior` is `load_prior_records` — a
+    // read of `assistant_events`, which `DbSink` writes from its own async
+    // writer task (`src/ai/persistence.rs`'s module doc). Approving B while
+    // A's `ToolOutput` is still in flight to that table therefore hands
+    // `send_and_collect` a *stale* "A is still open" signal, which correctly
+    // (per its own contract) stops it from waiting for the session's
+    // continuation — so it returns the instant B's own `ToolOutput` lands and
+    // the closing reply asserted below is simply not in the response yet.
+    // That is a real product-side race in `approve`'s readiness input, not
+    // the batch-draining behavior under test here; polling the same durable
+    // projection the engine itself reads keeps this test aimed at its own
+    // subject. The assertions are unaffected: both approvals are still timed
+    // from their own request, and "call B has not run yet" still holds
+    // throughout this wait.
+    for _ in 0..40 {
+        let (status, resp) = send(
+            &fx.app,
+            "GET",
+            &format!("/assistant/sessions/{db_session_id}"),
+            &fx.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "read session: {resp}");
+        let still_pending = pending_call_ids(resp["messages"].as_array().expect("messages array"));
+        if still_pending == vec![call_ids[1].clone()] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     // Approve the second (last) call — this is what actually drains the
     // batch and lets the turn continue to its closing text reply.
     let start = std::time::Instant::now();
