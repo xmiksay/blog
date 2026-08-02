@@ -225,6 +225,99 @@ describe('useLiveTurns — sub-agent routing', () => {
     expect(loadSession).not.toHaveBeenCalled()
   })
 
+  // ---- sending / composer gating (#103) ----
+
+  it('a child status locks the composer when the child itself is the open session', () => {
+    current.value = { id: 5 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('status', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        state: 'thinking',
+      }),
+    )
+    expect(sending.value).toBe(true)
+  })
+
+  it('locks the composer on a child status whose id was only backfilled by an earlier event', () => {
+    current.value = { id: 5 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('session_started', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+      }),
+    )
+    // The backend's child-row cache missed on this one — no id in the payload.
+    wsHandler!(
+      envelope('status', { db_session_id: 1, agent_session_id: 'child-1', state: 'working' }),
+    )
+    expect(sending.value).toBe(true)
+  })
+
+  it('a child status does NOT lock the root composer — the root stays promptable during a detached spawn', () => {
+    current.value = { id: 1 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('status', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        state: 'thinking',
+      }),
+    )
+    expect(sending.value).toBe(false)
+  })
+
+  it('a terminal child state leaves the composer enabled', () => {
+    current.value = { id: 5 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('status', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        state: 'idle',
+      }),
+    )
+    expect(sending.value).toBe(false)
+  })
+
+  it("a child's done releases the composer when the child is the open session", () => {
+    current.value = { id: 5 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('status', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        state: 'thinking',
+      }),
+    )
+    expect(sending.value).toBe(true)
+
+    wsHandler!(
+      envelope('done', { db_session_id: 1, agent_session_id: 'child-1', child_db_session_id: 5 }),
+    )
+    expect(sending.value).toBe(false)
+  })
+
+  it("a child's done does not release the root composer mid-turn", () => {
+    current.value = { id: 1 } as AssistantSessionDetail
+    setup()
+    // The root's own turn is in flight (it spawned this child and is waiting).
+    wsHandler!(envelope('status', { db_session_id: 1, state: 'waiting_agent' }))
+    expect(sending.value).toBe(true)
+
+    wsHandler!(
+      envelope('done', { db_session_id: 1, agent_session_id: 'child-1', child_db_session_id: 5 }),
+    )
+    expect(sending.value).toBe(true)
+  })
+
   // ---- resolveLiveToolCall: the click-triggered path (#stuck approval fix) ----
 
   it('resolveLiveToolCall marks a root call done without output, simulating the click path', () => {

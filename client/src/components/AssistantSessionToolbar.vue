@@ -11,10 +11,13 @@ import { profileIcon } from '../composables/useAssistantContent'
 
 const assistant = useAssistantStore()
 
-// A sub-agent session (#99) runs under the profile and model its parent
-// spawned it with, and the server refuses to switch either or to compact it
-// (#101). Hide those controls rather than offer a click that 4xxs — the MCP
-// and generation pickers stay, they are not part of the spawn contract.
+// A sub-agent session (#99) runs under the profile, model and generation
+// posture its parent spawned it with. #101 put `require_root` on the whole of
+// `PATCH /api/assistant/sessions/{id}`, so *every* settings write against a
+// child row 409s — that covers the MCP picker and the generation popover just
+// as much as the model/profile pickers, since all of them call
+// `updateSession`. Hide the lot rather than offer a click that can only fail;
+// `compact` is root-only for the same reason.
 const readOnly = computed(() => assistant.current?.parent_session_id != null)
 
 const emit = defineEmits<{ compacted: [] }>()
@@ -138,7 +141,7 @@ async function applyThinkingBudget() {
     <span
       v-if="readOnly"
       class="rounded bg-gray-100 px-2 py-1 whitespace-nowrap"
-      :title="`Sub-agent of chat #${assistant.current.parent_session_id} — model, profile and compaction are fixed by its parent`"
+      :title="`Sub-agent of chat #${assistant.current.parent_session_id} — its model, profile, MCP servers and generation settings are fixed by its parent`"
     >
       {{ profileIcon(assistant.current.agent_profile) }} {{ assistant.current.agent_profile }} ·
       {{ assistant.current.model }}
@@ -177,7 +180,7 @@ async function applyThinkingBudget() {
     >
       Compact
     </button>
-    <div class="relative">
+    <div v-if="!readOnly" class="relative">
       <button
         type="button"
         class="border rounded px-2 py-1 text-xs hover:bg-gray-50"
@@ -215,7 +218,7 @@ async function applyThinkingBudget() {
         </label>
       </div>
     </div>
-    <div class="relative">
+    <div v-if="!readOnly" class="relative">
       <button
         type="button"
         class="border rounded px-2 py-1 text-xs hover:bg-gray-50"

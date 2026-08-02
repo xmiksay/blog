@@ -40,7 +40,15 @@ describe('AssistantSessionToolbar', () => {
     expect(wrapper.text()).toContain('Compact')
   })
 
-  it('goes read-only on a sub-agent session — no model picker, compact or profile switch', () => {
+  it('offers the MCP and generation pickers on a root session', () => {
+    withSession({})
+    const wrapper = mount(AssistantSessionToolbar)
+
+    expect(wrapper.text()).toContain('MCP')
+    expect(wrapper.text()).toContain('Gen')
+  })
+
+  it('goes read-only on a sub-agent session — no model picker, compact, profile, MCP or generation controls', () => {
     withSession({ parent_session_id: 1, agent_profile: 'researcher' })
     const wrapper = mount(AssistantSessionToolbar)
 
@@ -48,8 +56,12 @@ describe('AssistantSessionToolbar', () => {
     expect(wrapper.text()).not.toContain('Compact')
     // Replaced by a static "what this child runs as" badge.
     expect(wrapper.text()).toContain('🔎 researcher')
-    // The MCP and generation pickers are not part of the spawn contract.
-    expect(wrapper.text()).toContain('MCP')
-    expect(wrapper.text()).toContain('Gen')
+    // `require_root` covers the *whole* PATCH endpoint (#101), so the MCP
+    // picker and the generation popover 409 on a child exactly like the model
+    // and profile pickers do — every one of them calls `updateSession`.
+    expect(wrapper.text()).not.toContain('MCP')
+    expect(wrapper.text()).not.toContain('Gen')
+    // Nothing clickable is left that would write to the server.
+    expect(wrapper.findAll('button')).toHaveLength(0)
   })
 })

@@ -136,6 +136,26 @@ export function useLiveTurns(
       case 'session_started':
         ensureLiveSubAgent(dbSessionId, agentSessionId, childDbSessionId, payload.profile)
         break
+      case 'status': {
+        // Lock the composer while *this child's own row* is the open session
+        // (#103). Prompting a busy child is not refused, it is stashed: the
+        // `SessionCmd::Prompt` queues behind the running turn and the HTTP
+        // request blocks until that turn settles — up to the 180 s
+        // `TURN_TIMEOUT`. The root's `status` branch below can't cover this:
+        // `db_session_id` deliberately stays the root's row on a child's
+        // events (#102), so the child is only identifiable by its own id.
+        // Prefer the id seen on an earlier event — `status` can be the one
+        // that missed the backend's cache.
+        const childId = liveSubAgents.value[agentSessionId]?.childDbSessionId ?? childDbSessionId
+        if (
+          IN_FLIGHT_STATES.includes(payload.state as string) &&
+          childId !== undefined &&
+          current.value?.id === childId
+        ) {
+          sending.value = true
+        }
+        break
+      }
       case 'text_delta':
         ensureLiveSubAgent(dbSessionId, agentSessionId, childDbSessionId).text += payload.text ?? ''
         break
@@ -192,6 +212,11 @@ export function useLiveTurns(
         // always distinct rows, so at most one branch matches.
         const openId = current.value?.id
         if (openId !== undefined && (openId === dbSessionId || openId === childId)) {
+          // Release what the `status` branch above locked. Only for the child
+          // itself: the root stays promptable throughout a detached
+          // `agent_spawn`, so its `sending` belongs solely to its own event
+          // stream — which may still be mid-turn waiting on this child.
+          if (openId === childId) sending.value = false
           loadSession(openId).catch(() => {
             // best-effort — see the matching comment on the root-turn branch
           })
