@@ -112,6 +112,19 @@ export interface AssistantSession {
   updated_at: string
 }
 
+/**
+ * One projected transcript entry. `content` is the loosely-typed shape
+ * `ai::projection::project` produces — see `useAssistantContent.ts` for the
+ * accessors.
+ *
+ * On an `assistant` entry, `content.reasoning` (#98) is the turn's thinking
+ * text, **present only when the model actually produced some**: the backend
+ * omits the key rather than sending `null`, so a turn without thinking is
+ * byte-identical to a pre-#98 message. It's display-only — the engine never
+ * replays reasoning to a provider — and it is per *round*, not per prompt: a
+ * multi-tool-round turn attributes each round's thinking to that round's own
+ * assistant message.
+ */
 export interface AssistantMessage {
   id: number
   seq: number

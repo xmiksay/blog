@@ -10,6 +10,7 @@ import { renderMarkdown } from '../composables/useMarkdown'
 import type { AssistantSubAgent } from '../types'
 import {
   decisionFor,
+  messageReasoning,
   messageText,
   needsDecision,
   profileIcon,
@@ -99,6 +100,16 @@ async function decideAll(calls: ToolCallView[], approve: boolean, remember = fal
     </div>
   </div>
   <div v-else-if="role === 'assistant'" class="space-y-1">
+    <!-- Closed by default: thinking is context for a curious reader, not the
+         answer, so it must never push the reply itself off screen. Styled to
+         match the live reasoning bubble in `AssistantView.vue`. -->
+    <details
+      v-if="messageReasoning(content)"
+      class="max-w-2xl rounded-lg px-3 py-2 bg-gray-50 text-gray-500 text-xs italic"
+    >
+      <summary class="cursor-pointer not-italic">Thinking</summary>
+      <div class="mt-1 whitespace-pre-wrap">{{ messageReasoning(content) }}</div>
+    </details>
     <div
       v-if="messageText(content)"
       class="assistant-markdown max-w-2xl rounded-lg px-3 py-2 bg-gray-100 text-gray-900"

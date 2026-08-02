@@ -3,7 +3,7 @@ import { decisionFor, needsDecision, toolCalls } from './useAssistantContent'
 
 // `needsDecision` exists to fix a real bug: a batch can mix a call that's
 // genuinely still awaiting approval with one the policy auto-allowed (never
-// gets a `decisions` entry, per `src/ai/projection/mod.rs`'s `OpenTurn`) or
+// gets a `decisions` entry, per `src/ai/projection/turn.rs`'s `OpenTurn`) or
 // whose own decision landed on a different projected message than this one
 // (an engine/projection timing quirk — see that file's `mark_resolved_calls`
 // doc). The old check (`requiresApproval(content) && decisionFor(...) ===

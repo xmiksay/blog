@@ -1,7 +1,7 @@
 // Pure helpers for reading `AssistantMessage.content`'s loosely-typed shape
-// (`{ text?, tool_calls?, requires_approval?, decisions?, sub_agents? }` for
-// `assistant` messages, `{ tool_call_id, output, is_error }` for
-// `tool_result`, or a bare string). Shared by `AssistantMessageContent.vue`
+// (`{ text?, reasoning?, tool_calls?, requires_approval?, decisions?,
+// sub_agents? }` for `assistant` messages, `{ tool_call_id, output, is_error }`
+// for `tool_result`, or a bare string). Shared by `AssistantMessageContent.vue`
 // (used both top-level and recursively for nested sub-agent transcripts) and
 // `LiveToolCallList.vue`.
 
@@ -9,7 +9,7 @@ export interface ToolCallView {
   id: string
   name: string
   args: any
-  // Per-call, from `src/ai/projection/mod.rs`'s `OpenTurn::flush_into`/
+  // Per-call, from `src/ai/projection/turn.rs`'s `OpenTurn::flush_into`/
   // `mark_resolved_calls` — precise signals, unlike the message-level
   // `requires_approval` (below) and the `decisions` array, which the
   // engine's own timing can leave incomplete (see `needsDecision`'s doc).
@@ -23,6 +23,14 @@ export function messageText(content: any): string {
   if (typeof content.text === 'string') return content.text
   if ('text' in content || 'tool_calls' in content || 'decisions' in content) return ''
   return JSON.stringify(content)
+}
+
+// The turn's thinking text (#98), empty when the model produced none — the
+// backend omits the key entirely rather than sending `null`, so absence and
+// "thought nothing" are the same case here.
+export function messageReasoning(content: any): string {
+  if (!content || typeof content !== 'object') return ''
+  return typeof content.reasoning === 'string' ? content.reasoning : ''
 }
 
 export function toolCalls(content: any): ToolCallView[] {

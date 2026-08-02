@@ -8,7 +8,7 @@ import { useAssistantStore } from '../stores/assistant'
 // to gate every button on the message-level `requires_approval` flag plus
 // "no decision recorded yet", which can't distinguish a genuinely-pending
 // call from an auto-allowed sibling or an orphaned decision (see
-// `useAssistantContent.spec.ts` and `src/ai/projection/mod.rs`'s
+// `useAssistantContent.spec.ts` and `src/ai/projection/turn.rs`'s
 // `mark_resolved_calls` doc for the two root causes). Now it's keyed off each
 // call's own `requires_approval`/`resolved` fields instead.
 vi.mock('../stores/assistant', () => ({
@@ -72,6 +72,32 @@ describe('AssistantMessageContent', () => {
 
     await wrapper.find('button').trigger('click')
     expect(approveToolCalls).toHaveBeenCalledWith(1, 0, [{ tool_call_id: 'a', approve: true, remember: false }])
+  })
+
+  it('renders a closed "Thinking" disclosure when the message carries reasoning', () => {
+    const wrapper = mount(AssistantMessageContent, {
+      props: {
+        role: 'assistant',
+        content: { text: '4', reasoning: 'Let me add them.', tool_calls: [] },
+        messageId: 0,
+      },
+    })
+
+    const details = wrapper.find('details')
+    expect(details.exists()).toBe(true)
+    // Closed by default — the answer must stay the first thing on screen.
+    expect(details.attributes('open')).toBeUndefined()
+    expect(details.find('summary').text()).toBe('Thinking')
+    expect(details.text()).toContain('Let me add them.')
+  })
+
+  it('omits the "Thinking" disclosure when the message has no reasoning', () => {
+    const wrapper = mount(AssistantMessageContent, {
+      props: { role: 'assistant', content: { text: '4', tool_calls: [] }, messageId: 0 },
+    })
+
+    expect(wrapper.find('details').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Thinking')
   })
 
   it('shows "Approve all" only when more than one call still needs a decision', () => {

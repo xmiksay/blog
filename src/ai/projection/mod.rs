@@ -3,7 +3,7 @@
 //! Vue admin client already understands — `role` one of `user | assistant |
 //! tool_result | error`, with the `content` shapes documented on [`project`].
 //! Pure logic, no DB access — the easiest piece in this batch to unit test
-//! (see `tests.rs`).
+//! (see `tests/`).
 //!
 //! **Scope note:** this returns `{"role", "content"}` pairs only, not a full
 //! `MessageView` (`id`/`seq`/`created_at`). An `assistant_events` row doesn't
@@ -34,18 +34,32 @@
 //! and hands every non-root session's records to [`subagents`] to fold and
 //! attach — see that module's doc for the structural (not positional)
 //! child-to-spawning-call matching.
+//!
+//! ## Reasoning (#98)
+//!
+//! `OutEvent::ReasoningDelta` is already persisted (the runtime's tap has no
+//! allowlist), and folds into the enclosing assistant message's optional
+//! `"reasoning"` string. It is **display-only in both directions**: the engine
+//! never feeds it back to a provider — `entanglement-provider`'s Anthropic SSE
+//! reader discards `signature_delta` (`anthropic/sse.rs:192-194`), so a
+//! thinking block could not be replayed verifiably even if we wanted to, and
+//! core's own context rebuild drops `ReasoningDelta` outright
+//! (`session/replay.rs:132-134`). So this transcript field is for the reader,
+//! not for the model.
 
 #[cfg(test)]
 mod tests;
 
 mod subagents;
+mod turn;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use entanglement_core::{InMsg, OutEvent, SessionId};
 use entanglement_runtime::session_store::{LogPayload, LogRecord};
 use serde_json::{Value, json};
 use subagents::attach_sub_agents;
+use turn::{OpenTurn, mark_resolved_calls};
 
 /// One projected client-visible message: `{"role": ..., "content": ...}`.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +132,13 @@ fn fold(records: &[&LogRecord]) -> Vec<ProjectedMessage> {
                 turn.open = true;
                 turn.text.push_str(text);
             }
+            LogPayload::Out(OutEvent::ReasoningDelta { text, .. }) => {
+                // Opens the turn on its own: a round that only ever thinks and
+                // then calls a tool still has to produce an assistant message,
+                // or its reasoning would be silently dropped at the flush.
+                turn.open = true;
+                turn.reasoning.push_str(text);
+            }
             LogPayload::Out(OutEvent::ToolCall {
                 request_id,
                 tool,
@@ -171,55 +192,6 @@ fn fold(records: &[&LogRecord]) -> Vec<ProjectedMessage> {
     out
 }
 
-/// Retroactively flag every `tool_calls[]` entry that already has a matching
-/// `tool_result` message as `"resolved": true` — the most robust signal
-/// available for "is this call actually done", and one the client should
-/// trust over `decisions` (below). `flush_into`'s own per-call
-/// `requires_approval` (paired with this) says whether a call was *ever*
-/// gated at all; this says whether it's *still* worth a prompt. A client
-/// should only ever offer Allow/Reject for a call with `requires_approval:
-/// true` and no `resolved: true` — anything else is stale by construction.
-///
-/// Why this can't be derived from `decisions` alone: `InMsg::Approve`/
-/// `Reject` is recorded into whichever `OpenTurn` happens to be accumulating
-/// *at the moment that record is folded* — but a batch flushes (see
-/// `ToolOutput`'s match arm above) the instant its *first* call resolves,
-/// before every sibling in the same batch is necessarily decided. A
-/// second/third decision for that same already-flushed message, arriving
-/// after the reset, lands in a fresh `OpenTurn` instead — silently orphaned
-/// from the message it was actually deciding. Presence of a `tool_result` for
-/// the same `tool_call_id` sidesteps this entirely: it's only ever emitted
-/// once a call has genuinely resolved, regardless of how or when its
-/// decision got folded.
-fn mark_resolved_calls(out: &mut [ProjectedMessage]) {
-    let resolved: HashSet<String> = out
-        .iter()
-        .filter(|m| m.role == "tool_result")
-        .filter_map(|m| m.content.get("tool_call_id")?.as_str().map(String::from))
-        .collect();
-    for msg in out.iter_mut() {
-        if msg.role != "assistant" {
-            continue;
-        }
-        let Some(tool_calls) = msg
-            .content
-            .get_mut("tool_calls")
-            .and_then(Value::as_array_mut)
-        else {
-            continue;
-        };
-        for tc in tool_calls.iter_mut() {
-            let is_resolved = tc
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| resolved.contains(id));
-            if is_resolved && let Some(obj) = tc.as_object_mut() {
-                obj.insert("resolved".into(), Value::Bool(true));
-            }
-        }
-    }
-}
-
 /// `tool_runner`'s reply text for every failure path (`Deny`/reject/mask/
 /// unknown-tool/execution-error) starts with one of these two prefixes — see
 /// the module doc for why this is a heuristic, not a structural flag.
@@ -231,61 +203,4 @@ fn mark_resolved_calls(out: &mut [ProjectedMessage]) {
 /// flag the day `ToolOutput` grows one.
 fn looks_like_tool_error(output: &str) -> bool {
     output.starts_with("tool `") || output.starts_with("unknown tool:")
-}
-
-/// Buffered state for the assistant turn currently being folded — reset by
-/// [`OpenTurn::flush_into`], which is a no-op if nothing has accumulated.
-#[derive(Default)]
-struct OpenTurn {
-    open: bool,
-    text: String,
-    tool_calls: Vec<Value>,
-    pending: HashSet<String>,
-    decisions: Vec<Value>,
-}
-
-impl OpenTurn {
-    fn flush_into(&mut self, out: &mut Vec<ProjectedMessage>) {
-        if !self.open {
-            return;
-        }
-        // Per-call, not just the message-level `requires_approval` below: a
-        // batch can freely mix a call that actually paused for approval
-        // (present in `self.pending`, i.e. it got its own `ToolRequest`) with
-        // one the policy auto-allowed (only ever got a `ToolCall`, the
-        // display-only event every call gets regardless). Both end up in
-        // `tool_calls` either way, but only the former should ever offer an
-        // Allow/Reject prompt — flagging the message as a whole isn't
-        // specific enough for the client to tell them apart (see
-        // `mark_resolved_calls`'s doc for the concrete symptom this caused).
-        for tc in self.tool_calls.iter_mut() {
-            let is_pending = tc
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| self.pending.contains(id));
-            if is_pending && let Some(obj) = tc.as_object_mut() {
-                obj.insert("requires_approval".into(), Value::Bool(true));
-            }
-        }
-        let mut content = json!({
-            "text": if self.text.is_empty() { Value::Null } else { json!(self.text) },
-            "tool_calls": self.tool_calls,
-        });
-        if let Some(obj) = content.as_object_mut() {
-            if !self.pending.is_empty() {
-                obj.insert("requires_approval".into(), Value::Bool(true));
-            }
-            if !self.decisions.is_empty() {
-                obj.insert(
-                    "decisions".into(),
-                    Value::Array(std::mem::take(&mut self.decisions)),
-                );
-            }
-        }
-        out.push(ProjectedMessage {
-            role: "assistant",
-            content,
-        });
-        *self = OpenTurn::default();
-    }
 }

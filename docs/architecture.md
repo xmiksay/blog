@@ -459,7 +459,20 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   a `tool_result` is a text-prefix heuristic (`looks_like_tool_error`), not a
   structural flag — `OutEvent::ToolOutput` carries none, re-checked against
   entanglement-core 0.6.0 for #43/#87/#97 and still true (0.6 added a
-  multimodal `content: Vec<ContentPart>` to it, but no error flag).
+  multimodal `content: Vec<ContentPart>` to it, but no error flag). Since #98
+  the fold also keeps model thinking: `OutEvent::ReasoningDelta` (always
+  persisted — the runtime's tap has no allowlist) accumulates into an optional
+  `content.reasoning` string on the enclosing assistant message, emitted *only*
+  when non-empty so a turn without thinking stays byte-identical to before.
+  Because `OpenTurn::flush_into` already fires on every `ToolOutput`, a
+  multi-round turn attributes each round's reasoning to that round's own
+  assistant message rather than piling it all onto the last one. This is
+  **display-only and never replayed to a provider**: `entanglement-provider`'s
+  Anthropic SSE reader discards `signature_delta` (`anthropic/sse.rs:192-194`),
+  so a thinking block couldn't be replayed verifiably anyway, and core's own
+  context rebuild drops `ReasoningDelta` outright (`session/replay.rs:132-134`).
+  `turn.rs` holds `OpenTurn`/`flush_into`/`mark_resolved_calls`, split out of
+  `mod.rs` for the 400-line cap.
 - `tools/` — the built-in (non-MCP) tool vocabulary, ported to
   `entanglement_runtime::tools::Tool`. A curated subset of the site API (not
   full CRUD): pages `read`/`search`/`edit`/`delete`, tags `list`/`create`,
