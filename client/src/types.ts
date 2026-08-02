@@ -108,6 +108,10 @@ export interface AssistantSession {
   thinking_budget_tokens: number | null
   /** `"build" | "researcher" | "page-writer"`; never null, defaults to `"build"`. */
   agent_profile: string
+  /** Spawning parent session for a sub-agent; `null` on a root session. */
+  parent_session_id: number | null
+  /** Engine session id this session's event log is filed under — its own on a root, the root's on a sub-agent child. */
+  root_engine_session_id: string
   created_at: string
   updated_at: string
 }

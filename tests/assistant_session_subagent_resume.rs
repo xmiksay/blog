@@ -101,6 +101,8 @@ async fn resume_replays_a_live_sub_agent_from_the_db_log_alone() {
         model_id: Set(None),
         enabled_mcp_server_ids: Set(json!([])),
         engine_session_id: Set(Some(root.0.clone())),
+        // A root session is its own log key (#99, m_032).
+        root_engine_session_id: Set(root.0.clone()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -306,6 +308,29 @@ async fn resume_replays_a_live_sub_agent_from_the_db_log_alone() {
         call_id, "edit-1",
         "the id round-tripped through replay+projection: {resp:#}"
     );
+
+    // #99: the same read hydrates the child's own `assistant_sessions` row,
+    // off a purely synthetic log — no live spawn ever happened in this
+    // process. Asserted with no polling on purpose: hydration runs *inside*
+    // `read` before it projects, so the row is there by the time the response
+    // is built. (The resume cascade re-announces the child's `SessionStarted`
+    // on the broadcast too, so `ws_bridge`'s writer may also see it — but only
+    // on its own schedule, which is exactly the race this is not relying on.)
+    let child_row = assistant_session::Entity::find()
+        .filter(assistant_session::Column::EngineSessionId.eq(child.0.clone()))
+        .one(&fx.db)
+        .await
+        .expect("query assistant_sessions")
+        .unwrap_or_else(|| {
+            panic!(
+                "hydration never created a session row for the replayed child {}",
+                child.0
+            )
+        });
+    assert_eq!(child_row.parent_session_id, Some(db_session_id));
+    assert_eq!(child_row.user_id, fx.user_id);
+    assert_eq!(child_row.root_engine_session_id, root.0);
+    assert_eq!(child_row.agent_profile, "page-writer");
 
     // The `GET` above only *starts* the resume (`ensure_live` sends
     // `InMsg::Resume` and returns); the resumed child's own session task then

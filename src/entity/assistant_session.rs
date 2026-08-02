@@ -24,6 +24,18 @@ pub struct Model {
     /// a DB session row owns exactly one engine session (m_023).
     #[sea_orm(nullable, unique)]
     pub engine_session_id: Option<String>,
+    /// Spawning parent row for a `researcher`/`page-writer` sub-agent session
+    /// (#99, m_032); `None` on a root session. Self-FK, `ON DELETE CASCADE`.
+    #[sea_orm(nullable)]
+    pub parent_session_id: Option<i32>,
+    /// The engine `SessionId` this row's `assistant_events` are filed under —
+    /// its own [`Self::engine_session_id`] on a root, the root's on a child
+    /// (m_032). Deliberately the engine id and not a pointer to the root
+    /// *row*: `/compact` repoints a root row's `engine_session_id` to a fresh
+    /// successor while the pre-compaction log stays under the old key, so a
+    /// row pointer would silently resolve a child to the successor's log and
+    /// read back a blank transcript.
+    pub root_engine_session_id: String,
     /// Session-level generation overrides (#42, ADR-0094), mirrored onto the
     /// live engine session via `InMsg::SetGeneration` — `None` leaves that knob
     /// at the model's own default (m_027).
@@ -60,6 +72,14 @@ pub enum Relation {
         on_delete = "SetNull"
     )]
     LlmModel,
+    /// Self-relation for a sub-agent child's spawning parent (#99).
+    #[sea_orm(
+        belongs_to = "Entity",
+        from = "Column::ParentSessionId",
+        to = "Column::Id",
+        on_delete = "Cascade"
+    )]
+    Parent,
 }
 
 impl Related<super::llm_model::Entity> for Entity {

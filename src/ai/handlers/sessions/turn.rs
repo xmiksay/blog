@@ -38,7 +38,7 @@ use entanglement_runtime::session_store::LogRecord;
 use routing::{open_tool_requests, remember_deny};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
-use super::{MessageView, SessionDetail, SessionSummary, load_owned};
+use super::{MessageView, SessionDetail, SessionSummary, load_owned, subagent_links};
 use crate::ai::projection::{self, ProjectedMessage};
 use crate::entity::{assistant_event, assistant_session};
 use crate::routes::api::error::{ApiError, ApiResult};
@@ -206,6 +206,11 @@ async fn build_detail(
 ) -> ApiResult<Json<SessionDetail>> {
     let mut records = prior;
     records.extend(collected);
+    // The turn that just ran may itself have spawned a sub-agent; write its
+    // row here rather than hoping `ws_bridge`'s independent task got there
+    // first, or this very response carries a card with no session to open
+    // (see `subagent_links`).
+    subagent_links::hydrate_child_rows(&state.db, &records).await;
     let projected = projection::project(&records);
     let session = assistant_session::Entity::find_by_id(id)
         .one(&state.db)

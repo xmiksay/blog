@@ -41,8 +41,8 @@ src/
     llm_{provider,model},
     assistant_{session,event},
     user_mcp_server, tool_permission
-  migration/              # m_001 … m_031
-  ai/                     # config, handlers, tool_permissions, ws_bridge —
+  migration/              # m_001 … m_032
+  ai/                     # config, handlers, tool_permissions, ws_bridge/ —
                           # plus the entanglement-core/-runtime engine
                           # adapters: engine, catalog, mcp, persistence,
                           # policy, projection/, tools/
@@ -151,6 +151,19 @@ assistant_sessions  id, user_id, title, provider/model snapshots, model_id?,
                     at the model's own default), agent_profile (m_027,
                     default `"build"` — the engine profile the session runs
                     under, `"build"`/`"researcher"`/`"page-writer"`),
+                    parent_session_id? + root_engine_session_id (m_032, #99 —
+                    a spawned researcher/page-writer sub-agent is a real row
+                    of its own; parent_session_id is a self-FK ON DELETE
+                    CASCADE, so deleting a root takes its whole sub-tree.
+                    root_engine_session_id is the *engine* id the row's
+                    assistant_events are filed under — its own on a root, the
+                    root's on a child — deliberately not a pointer to the root
+                    *row*: /compact repoints a root's engine_session_id to a
+                    fresh successor while the pre-compaction log stays under
+                    the old key, so a row pointer would resolve a child to the
+                    successor's log and read back a blank transcript. Written
+                    by ws_bridge/child_rows.rs and handlers/sessions/
+                    subagent_links.rs),
                     timestamps
 assistant_events    id, root_session_id (engine SessionId string, not a DB FK —
                     the engine has no notion of assistant_sessions.id),
@@ -433,7 +446,16 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   they share one `root_session_id`) to `Holly::resume` in one call —
   entanglement 0.6.0's `resume` cascades over the *whole* spawn sub-tree
   itself (ADR-0112), re-materializing a child that was still live as of where
-  the log stopped, so no per-child loop is needed here.
+  the log stopped, so no per-child loop is needed here. That one shared
+  `root_session_id` is exactly why `assistant_sessions.root_engine_session_id`
+  (m_032, #99) stores an *engine* id rather than a pointer to the root row:
+  every one of these three filters (`resume_session`,
+  `handlers/sessions/turn::load_prior_records`, `delete_session_events`) keys
+  on the engine id, and a `/compact` moves the root row's
+  `engine_session_id` to a fresh successor while the pre-compaction log stays
+  under the old key — so a child holding a row pointer would resolve to the
+  successor's (empty-of-it) log and read back a blank transcript even though
+  its own records are fully intact.
   `handlers/sessions/turn/collect.rs`'s `send_and_collect` builds its own response
   from the `LogRecord`s it just observed rather than re-reading
   `assistant_events` after a turn settles — reassessed for #43 and unrelated
@@ -499,7 +521,8 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   never fires (`SitePolicy` always passes `workdir = None`).
 - `handlers/` — `/api/assistant/*`: `sessions/` (CRUD + `messages`/`approve`,
   which drive a turn through `Holly` and project `assistant_events` on the
-  way out, plus `compact.rs`'s `sessions/{id}/compact`, #40 — see below),
+  way out, plus `compact.rs`'s `sessions/{id}/compact`, #40, and
+  `subagent_links.rs`'s `hydrate_child_rows` — see below),
   `mcp_servers.rs`, `providers.rs` (CRUD + `providers/status`, live
   per-provider throttle posture from `SiteCatalog::throttle_statuses()`,
   #89), `models.rs` (`context_window` field, #40), `permissions.rs`.
@@ -558,14 +581,18 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
     already ran under the engine default by the time this lands, since
     `SetModel` is stashed behind a live turn), and retires the source
     (`InMsg::CloseSession`). The `assistant_sessions` row keeps its id/title;
-    only `engine_session_id` repoints to the successor, so `GET
+    only `engine_session_id` (and, since #99, `root_engine_session_id` with
+    it — everything the row reads from here on, including any sub-agent it
+    spawns next, lives under the successor) repoints to the successor, so `GET
     /sessions/{id}` (and every other DB-id-keyed handler) transparently
     follows the fork. The source's own `assistant_events` log is left
     intact but unreachable from the DB row (ADR-0101: "the original stays
-    idle, intact, independently resumable"). Broadcasts a `compacted` event
+    idle, intact, independently resumable") — sub-agent rows spawned *before*
+    the compaction deliberately keep pointing at it, which is what keeps their
+    transcripts readable. Broadcasts a `compacted` event
     over the `assistant` WS topic (see below) so another open tab on the
     session notices and refetches.
-- `ws_bridge.rs` — a single process-wide task subscribing to
+- `ws_bridge/` — a single process-wide task subscribing to
   `agent_engine.holly.subscribe()` (issue #16): forwards the engine's
   content/lifecycle `OutEvent`s (`Status`, `TextDelta`, `ReasoningDelta`,
   `ToolCallDelta`, `ToolCall`, `ToolRequest`, `ToolOutput`, `Done`, `Error`,
@@ -591,6 +618,28 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   envelope shape unchanged for any session that never spawns a sub-agent.
   This is genuine token-level streaming — see the WebSocket Hub section
   below.
+  - **Sub-agent session rows (`ws_bridge/child_rows.rs`, #99):** a child's own
+    `SessionStarted` is the only event naming both its parent and its profile,
+    so it is also where the child's `assistant_sessions` row is written —
+    before the event is forwarded, so the client never sees a child it can't
+    open. `ensure_child_row` derives `user_id`/`provider`/`model`/`model_id`/
+    `root_engine_session_id` from the **parent row** (never
+    `engine::user_id_from_session`, whose `SESSION_PARENTS` entry is evicted
+    the moment the child hibernates or ends) and refuses outright when that
+    row is absent rather than guessing an owner. Three writers race on the
+    same child — this task plus `handlers/sessions/subagent_links.rs`'s
+    `hydrate_child_rows`, called from `read`/`send_message`/`approve`/`compact`
+    — so the insert is `ON CONFLICT (engine_session_id) DO NOTHING` (the m_023
+    unique index) plus a `SELECT`, never check-then-insert.
+    `hydrate_child_rows` rebuilds the same rows from the log a handler is
+    already holding, walking it in order (topological for free: a grandchild's
+    `SessionStarted` always follows its parent's). That closes the window
+    where the REST response for the very turn that spawned a child would carry
+    a null child id, and repairs anything the live task lost to a
+    `RecvError::Lagged` batch, which never comes back on the broadcast.
+    `db_session_id` keeps naming the **root's** row for a child's events
+    regardless, since that is what the client keys the inline
+    running-sub-agent card on.
 
 Configured per user via the admin SPA: `/admin/{providers,models,assistant,mcp-servers,tool-permissions}`. Provider API keys live in `llm_providers.api_key` (set through the UI, never in `.env`).
 
@@ -631,7 +680,7 @@ Two routes call `render_page`, both refusing `format=slides` with `503` up front
 Frames are JSON `Envelope { topic, event, payload }`, `topic` one of `assistant | pages | files | galleries | tags`:
 
 - **`pages` / `files` / `galleries` / `tags`** — `created`/`updated` (payload = the same summary shape the REST endpoint returns) / `deleted` (payload `{ id }`). Broadcast to **every** connected user via `WsHub::broadcast`/`broadcast_serialized` — these are shared site entities, not per-user. Published from the shared `src/routes/broadcast.rs` helpers, called after a successful create/update/delete from all three mutating edges — `src/routes/api/{pages,files,galleries,tags}.rs`, `src/routes/mcp/{pages,tags,files,galleries}.rs`, and `src/ai/tools/*.rs` — so a mutation over MCP or by the AI assistant broadcasts the same event a REST API mutation would (#25).
-- **`assistant`** — real, token-level streaming straight off `agent_engine.holly.subscribe()` (`src/ai/ws_bridge.rs`), published only to the owning user's own connections via `WsHub::publish`. `event` is the forwarded `OutEvent`'s own `"kind"` tag and `payload` is that event's JSON shape (`entanglement_core::OutEvent` already derives `Serialize`) plus a spliced-in `db_session_id` (the `assistant_sessions.id` the engine's root `SessionId` resolves to, cached per session): `status` (`AgentState`: idle/thinking/waiting_approval/waiting_answer/done/error), `text_delta`/`reasoning_delta` (incremental text), `tool_call_delta` (incremental tool-input fragment), `tool_call` (display-only, full call), `tool_request` (needs approval — approve/reject the same way as an existing message's tool call, `POST .../messages/{any}/approve`, since the engine no longer keys approvals by message id), `tool_output`, `done`, `error`, `session_hibernated`, (#17) a sub-agent child's own `session_started` (`{session, profile, parent}`, `researcher`/`page-writer`), and (#88) `ambiguous_retry` (`{nudge}`, ADR-0118) — an ollama "stream died" stop with no tool calls and no confident finish signal, folded by the client's live-turn store into a transient `retrying: true` flag (cleared by the next `text_delta`/`done`/`error`) rather than any persisted transcript content, since `ai::projection::project` deliberately drops it (a round boundary, not a message). Any event belonging to a sub-agent child also carries `agent_session_id` (the child's own engine `SessionId`) so the client can render it nested under the spawning turn instead of the root's own top-level stream. `compacted` (#40) is the one `assistant.*` event *not* forwarded by `ws_bridge.rs` — `handlers/sessions/compact.rs` publishes it directly once a manual compaction's fork/retire completes, carrying the real `OutEvent::Compacted` shape (`summary`, `kept`, `auto: false`) plus `db_session_id` and `successor_session_id`, so another open tab on the session notices its `engine_session_id` moved and refetches.
+- **`assistant`** — real, token-level streaming straight off `agent_engine.holly.subscribe()` (`src/ai/ws_bridge/`), published only to the owning user's own connections via `WsHub::publish`. `event` is the forwarded `OutEvent`'s own `"kind"` tag and `payload` is that event's JSON shape (`entanglement_core::OutEvent` already derives `Serialize`) plus a spliced-in `db_session_id` (the `assistant_sessions.id` the engine's root `SessionId` resolves to, cached per session): `status` (`AgentState`: idle/thinking/waiting_approval/waiting_answer/done/error), `text_delta`/`reasoning_delta` (incremental text), `tool_call_delta` (incremental tool-input fragment), `tool_call` (display-only, full call), `tool_request` (needs approval — approve/reject the same way as an existing message's tool call, `POST .../messages/{any}/approve`, since the engine no longer keys approvals by message id), `tool_output`, `done`, `error`, `session_hibernated`, (#17) a sub-agent child's own `session_started` (`{session, profile, parent}`, `researcher`/`page-writer`), and (#88) `ambiguous_retry` (`{nudge}`, ADR-0118) — an ollama "stream died" stop with no tool calls and no confident finish signal, folded by the client's live-turn store into a transient `retrying: true` flag (cleared by the next `text_delta`/`done`/`error`) rather than any persisted transcript content, since `ai::projection::project` deliberately drops it (a round boundary, not a message). Any event belonging to a sub-agent child also carries `agent_session_id` (the child's own engine `SessionId`) so the client can render it nested under the spawning turn instead of the root's own top-level stream. Since #99 a sub-agent child *is* an `assistant_sessions` row of its own, but `db_session_id` deliberately still names the **root's** row for its events — that is what the client filters the inline running-sub-agent card on; the child's own row id is added alongside, additively, by #102. `compacted` (#40) is the one `assistant.*` event *not* forwarded by `ws_bridge` — `handlers/sessions/compact.rs` publishes it directly once a manual compaction's fork/retire completes, carrying the real `OutEvent::Compacted` shape (`summary`, `kept`, `auto: false`) plus `db_session_id` and `successor_session_id`, so another open tab on the session notices its `engine_session_id` moved and refetches.
 
 Server sends a WS ping every 30s; a failed send (or a client `Close` frame) drops that connection's sender from the registry. `WsHub::publish`/`broadcast` also prune any sender whose receiver has been dropped.
 

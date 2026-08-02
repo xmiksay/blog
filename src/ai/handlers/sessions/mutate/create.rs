@@ -86,6 +86,9 @@ pub async fn create(
         model_id: Set(Some(model_row.id)),
         enabled_mcp_server_ids: Set(ids_to_json(&mcp_ids)),
         engine_session_id: Set(Some(session_id.0.clone())),
+        // A root session is its own log key (#99); only a sub-agent child ever
+        // points at somebody else's.
+        root_engine_session_id: Set(session_id.0.clone()),
         temperature: Set(input.temperature),
         reasoning_effort: Set(input.reasoning_effort.clone()),
         max_output_tokens: Set(input.max_output_tokens.map(|n| n as i32)),

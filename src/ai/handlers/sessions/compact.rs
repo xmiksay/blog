@@ -25,7 +25,7 @@ use sea_orm::{ActiveModelTrait, Set};
 
 use super::mutate::{resolve_model_with_provider, session_mcp_specs};
 use super::turn::{engine_session_id, send_and_collect, to_detail};
-use super::{SessionDetail, load_owned, parse_id_array};
+use super::{SessionDetail, load_owned, parse_id_array, subagent_links};
 use crate::ai::engine::SiteEngine;
 use crate::ai::projection;
 use crate::entity::assistant_session;
@@ -177,11 +177,19 @@ pub async fn compact(
 
     let mut active: assistant_session::ActiveModel = session.into();
     active.engine_session_id = Set(Some(successor.0.clone()));
+    // The root's own log key moves with it — everything this row reads from
+    // here on lives under the successor, including any sub-agent it spawns
+    // next (`ws_bridge::child_rows` inherits this column). Children spawned
+    // *before* the compaction deliberately keep the pre-compaction value:
+    // their records are still filed under the old key and stay readable there
+    // (#99's whole reason for storing an engine id rather than a row pointer).
+    active.root_engine_session_id = Set(successor.0.clone());
     active.updated_at = Set(chrono::Utc::now().fixed_offset());
     let updated = active.update(&state.db).await?;
 
     publish_compacted(&state, user_id, id, &compacted, &successor);
 
+    subagent_links::hydrate_child_rows(&state.db, &collected).await;
     let projected = projection::project(&collected);
     Ok(Json(to_detail(&updated, projected)))
 }

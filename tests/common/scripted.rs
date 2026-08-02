@@ -45,7 +45,26 @@ pub async fn setup_scripted(
     let db = sea_orm::Database::connect(db_url)
         .await
         .expect("connect to DATABASE_URL");
-    build_fixture(db, tag, llm_factory).await
+    build_fixture(db, tag, llm_factory, true).await
+}
+
+/// Same as [`setup_scripted`], but **without** `site::ai::ws_bridge::spawn` —
+/// the live half of #99's sub-agent row writer. Lets a test prove that the
+/// handler-side hydration path (`handlers::sessions::subagent_links`) creates a
+/// spawned child's `assistant_sessions` row on its own, rather than passing
+/// because the WS task happened to win the race.
+///
+/// Nothing else in the fixture depends on the bridge: it only forwards engine
+/// events to `WsHub`, and no integration test subscribes to that.
+pub async fn setup_scripted_without_ws_bridge(
+    db_url: &str,
+    tag: &str,
+    llm_factory: entanglement_core::LlmFactory,
+) -> ScriptedFixture {
+    let db = sea_orm::Database::connect(db_url)
+        .await
+        .expect("connect to DATABASE_URL");
+    build_fixture(db, tag, llm_factory, false).await
 }
 
 /// Label prefix every throwaway catalog row below shares, so
@@ -151,7 +170,7 @@ pub async fn setup_scripted_with_context_window(
         .expect("connect to DATABASE_URL");
     let (provider_id, _model_id) =
         insert_throwaway_model(&db, tag, context_window, true, None).await;
-    let fixture = build_fixture(db, tag, llm_factory).await;
+    let fixture = build_fixture(db, tag, llm_factory, true).await;
     let _ = llm_provider::Entity::delete_by_id(provider_id)
         .exec(&fixture.db)
         .await;
@@ -187,7 +206,7 @@ pub async fn setup_scripted_with_catalog_model(
         .expect("connect to DATABASE_URL");
     let (provider_id, model_id) =
         insert_throwaway_model(&db, tag, context_window, false, Some(base_url)).await;
-    let fixture = build_fixture(db, tag, llm_factory).await;
+    let fixture = build_fixture(db, tag, llm_factory, true).await;
     (fixture, provider_id, model_id)
 }
 
@@ -195,6 +214,7 @@ async fn build_fixture(
     db: DatabaseConnection,
     tag: &str,
     llm_factory: entanglement_core::LlmFactory,
+    ws_bridge: bool,
 ) -> ScriptedFixture {
     let username = format!("assistant-flow-{tag}-{}", uuid::Uuid::new_v4());
     let saved_user = user::ActiveModel {
@@ -230,7 +250,9 @@ async fn build_fixture(
     )
     .await
     .expect("spawn scripted assistant engine");
-    site::ai::ws_bridge::spawn(engine.clone(), ws_hub.clone(), db.clone());
+    if ws_bridge {
+        site::ai::ws_bridge::spawn(engine.clone(), ws_hub.clone(), db.clone());
+    }
     let state = AppState {
         db: db.clone(),
         tmpl: site::templates::Templates::new(std::sync::Arc::new(site::design::DesignStore::new(
@@ -265,6 +287,8 @@ pub async fn scripted_session(fx: &ScriptedFixture) -> (i32, entanglement_core::
         model_id: Set(None),
         enabled_mcp_server_ids: Set(serde_json::json!([])),
         engine_session_id: Set(Some(session_id.0.clone())),
+        // A root session is its own log key (#99, m_032).
+        root_engine_session_id: Set(session_id.0.clone()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -295,6 +319,8 @@ pub async fn scripted_session_with_model(
         model_id: Set(Some(model_id)),
         enabled_mcp_server_ids: Set(serde_json::json!([])),
         engine_session_id: Set(Some(session_id.0.clone())),
+        // A root session is its own log key (#99, m_032).
+        root_engine_session_id: Set(session_id.0.clone()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()

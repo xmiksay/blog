@@ -19,21 +19,25 @@
 //! The engine only knows `SessionId` (`u{user_id}:{uuid}`); the client only
 //! knows the DB `assistant_sessions.id` it got from REST. Every forwarded
 //! event gets a `db_session_id` field spliced into its payload, resolved via
-//! a small process-lifetime cache (`engine_session_id` is set once at session
-//! creation and never changes, so nothing needs to invalidate the cache
-//! short of the process restarting).
+//! a small process-lifetime cache keyed by `engine_session_id`. The cache is
+//! *not* immortal: `handlers/sessions/compact.rs` repoints a row's
+//! `engine_session_id` to a fresh successor session, so an entry can outlive
+//! the mapping it recorded — harmless here, because the retired id is closed
+//! and never emits another event, and a compaction always mints a **new** id
+//! that simply isn't cached yet.
 //!
-//! ## Sub-agent (#17) events
+//! ## Sub-agent (#17, #99) events
 //!
 //! A `researcher`/`page-writer` child's own events carry the *child's*
-//! `SessionId` (a bare uuid, not a DB `assistant_sessions` row of its own —
-//! only the root session is ever persisted there). `forward` resolves
-//! `db_session_id` off the event's **root** ancestor instead, so a child's
-//! deltas land in the same WS stream as its parent turn, with the child's own
-//! id spliced in as `agent_session_id` so the client can tell them apart and
-//! nest them. Root-level events get no `agent_session_id` at all (rather than
-//! one equal to their own session), keeping the envelope shape byte-identical
-//! to before #17 for every session that never spawns a sub-agent.
+//! `SessionId` — a bare uuid, which since #99 does have an
+//! `assistant_sessions` row of its own (written here, see [`child_rows`]).
+//! `forward` still resolves `db_session_id` off the event's **root** ancestor,
+//! so a child's deltas land in the same WS stream as its parent turn, with
+//! the child's own id spliced in as `agent_session_id` so the client can tell
+//! them apart and nest them. Root-level events get no `agent_session_id` at
+//! all (rather than one equal to their own session), keeping the envelope
+//! shape byte-identical to before #17 for every session that never spawns a
+//! sub-agent.
 //!
 //! Root resolution is **not** simply `engine::root_session_of` — that reads a
 //! process-global cache (`engine.rs`'s `SESSION_PARENTS`) written by a
@@ -49,6 +53,8 @@
 //! dependency on the other task's timing at all. It only falls through to the
 //! global cache for a child whose `SessionStarted` predates this
 //! subscription (a session already established when the process started).
+
+pub mod child_rows;
 
 use dashmap::DashMap;
 use entanglement_core::{OutEvent, SessionId};
@@ -75,7 +81,15 @@ pub fn spawn(engine: Arc<SiteEngine>, hub: Arc<WsHub>, db: DatabaseConnection) {
         loop {
             match sub.recv().await {
                 Ok(ev) => forward(&hub, &db, &session_db_ids, &mut local_parents, ev).await,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // The skipped batch may have carried a child's `SessionStarted`
+                // — the one event that writes its `assistant_sessions` row
+                // (#99). Log it rather than swallowing it: the row is repaired
+                // out-of-band by `handlers::sessions::subagent_links`, and this
+                // is the only trace that the live writer missed it.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "ws bridge lagged behind the engine broadcast");
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -127,14 +141,23 @@ async fn forward(
 ) {
     // Record the parent link *before* anything below needs to resolve a
     // root off it — including this very event, if it's the child's own
-    // `SessionStarted` (see the module doc).
+    // `SessionStarted` (see the module doc). The child's own
+    // `assistant_sessions` row (#99) is written here too, for the same reason:
+    // a `SessionStarted` is the only event that names both the parent and the
+    // profile the row needs, and the row must exist before the event reaches
+    // the client.
     if let OutEvent::SessionStarted {
         session,
         parent: Some(parent),
+        profile,
         ..
     } = &ev
     {
         local_parents.insert(session.clone(), parent.clone());
+        if let Some(child_db_id) = child_rows::ensure_child_row(db, session, parent, profile).await
+        {
+            session_db_ids.insert(session.0.clone(), child_db_id);
+        }
     }
 
     if !is_forwarded(&ev) {
@@ -150,6 +173,13 @@ async fn forward(
     let Ok(user_id) = user_id_from_session(&root) else {
         return;
     };
+    // Degrade, don't drop: `db_session_id` names the **root's** row for every
+    // event, a child's included, so a child whose own row never landed (its
+    // `SessionStarted` lost to `RecvError::Lagged`, or its parent row not yet
+    // written) keeps streaming under the root instead of going silent for the
+    // rest of its life. It is also what the client keys the inline
+    // running-sub-agent card on; the child's own row id is spliced alongside,
+    // additively (#102), never in place of this.
     let Some(db_session_id) = resolve_db_session_id(db, session_db_ids, &root).await else {
         return;
     };
@@ -203,7 +233,9 @@ fn local_root_of(local_parents: &HashMap<SessionId, SessionId>, session: &Sessio
 
 /// Resolve an engine `SessionId` to its owning `assistant_sessions.id`,
 /// caching hits — every event within a turn (potentially dozens of deltas)
-/// would otherwise round-trip the DB per event.
+/// would otherwise round-trip the DB per event. A sub-agent child's entry is
+/// seeded directly by `forward` from `child_rows::ensure_child_row`, so this
+/// never has to query for one mid-turn.
 async fn resolve_db_session_id(
     db: &DatabaseConnection,
     cache: &DashMap<String, i32>,

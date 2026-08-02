@@ -14,6 +14,7 @@
 
 mod compact;
 mod mutate;
+pub(super) mod subagent_links;
 mod turn;
 
 pub use compact::compact;
@@ -48,6 +49,11 @@ pub struct SessionSummary {
     pub max_output_tokens: Option<i32>,
     pub thinking_budget_tokens: Option<i32>,
     pub agent_profile: String,
+    /// Spawning parent row for a sub-agent session (#99); `null` on a root.
+    pub parent_session_id: Option<i32>,
+    /// The engine `SessionId` this session's `assistant_events` are filed
+    /// under — its own on a root, the root's on a sub-agent child (#99).
+    pub root_engine_session_id: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -80,6 +86,8 @@ impl From<&assistant_session::Model> for SessionSummary {
             max_output_tokens: s.max_output_tokens,
             thinking_budget_tokens: s.thinking_budget_tokens,
             agent_profile: s.agent_profile.clone(),
+            parent_session_id: s.parent_session_id,
+            root_engine_session_id: s.root_engine_session_id.clone(),
             created_at: s.created_at.to_string(),
             updated_at: s.updated_at.to_string(),
         }
@@ -138,6 +146,9 @@ pub async fn read(
         }
         None => Vec::new(),
     };
+    // Rebuild any sub-agent row `ws_bridge`'s live writer hasn't landed (or
+    // lost to a lagged broadcast) before projecting — see `subagent_links`.
+    subagent_links::hydrate_child_rows(&state.db, &records).await;
     let projected = crate::ai::projection::project(&records);
     Ok(Json(turn::to_detail(&session, projected)))
 }
