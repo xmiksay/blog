@@ -536,11 +536,12 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   never fires (`SitePolicy` always passes `workdir = None`).
 - `handlers/` — `/api/assistant/*`: `sessions/` (CRUD + `messages`/`approve`,
   which drive a turn through `Holly` and project `assistant_events` on the
-  way out, plus `compact.rs`'s `sessions/{id}/compact`, #40, and
-  `subagent_links.rs`'s `hydrate_child_rows` — see below),
-  `mcp_servers.rs`, `providers.rs` (CRUD + `providers/status`, live
-  per-provider throttle posture from `SiteCatalog::throttle_statuses()`,
-  #89), `models.rs` (`context_window` field, #40), `permissions.rs`.
+  way out, plus `compact.rs`'s `sessions/{id}/compact`, #40,
+  `subagent_links.rs`'s `hydrate_child_rows` and `tree.rs`'s root/child
+  resolution — see below), `mcp_servers.rs`, `providers.rs` (CRUD +
+  `providers/status`, live per-provider throttle posture from
+  `SiteCatalog::throttle_statuses()`, #89), `models.rs` (`context_window`
+  field, #40), `permissions.rs`.
   - **Reading a session (#100):** `GET /sessions/{id}` resumes and loads the
     *tree's* log by the row's `root_engine_session_id`, then projects the
     row's own `engine_session_id` out of it — identical for a root row (the
@@ -548,6 +549,29 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
     transcript at top level instead of an empty one. Keying the load on a
     child's own uuid would both read zero rows and resume a blank engine
     session under that id.
+  - **Root-only operations and interactive children (`sessions/tree.rs`,
+    #101):** `tree::root_engine_id` (a plain `root_engine_session_id` read)
+    is the log key for *every* `{id}`-taking handler, and
+    `tree::require_root` refuses `PATCH`, `compact` and `DELETE` on a
+    sub-agent row with a **409** — a child can't take a model/profile switch,
+    a compaction successor is root-shaped, and deleting only the child's row
+    strands events filed under the root. `DELETE` on a root additionally
+    `CloseSession`s/`forget_live`s every descendant (`tree::descendants`)
+    before the self-FK cascade removes their rows, and purges
+    `assistant_events` for every log key the tree ever used (a compaction
+    leaves pre-compaction children on the older key). `GET` and
+    `POST .../messages`/`approve` *are* allowed on a child: upstream never
+    closes a finished sub-agent, so `ensure_target_live` (`sessions/turn.rs`)
+    resumes the **root** (whose ADR-0112 cascade re-materializes descendants),
+    checks `SiteEngine::await_live` for the child, and only then rebuilds it
+    from its own slice of the root's log via
+    `persistence::resume_child_session`. `load_prior_records` stays
+    root-keyed throughout, since approval routing scans every session's
+    records. `GET /sessions` stays a flat array but is emitted in tree
+    pre-order (`tree::order_for_tree`: roots by `updated_at` descending, each
+    followed by its own children by `created_at` ascending) — a child row is
+    created mid-turn, so a naive flat `updated_at DESC` sorts it above its
+    own parent.
   - **Live model/generation/profile switching (`sessions/mod.rs`,
     `sessions/mutate/generation.rs`, #42):** `POST /sessions` and
     `PATCH /sessions/{id}` accept optional `temperature`/`reasoning_effort`/

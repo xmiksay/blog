@@ -33,10 +33,12 @@
 //! backstop" the issue calls for — the next phase does not need to call
 //! `Holly::hibernate` itself unless it wants tighter control.
 
+mod live;
 mod profiles;
 mod prompt_cache;
 mod session_tree;
 
+use live::LiveSessions;
 pub use profiles::{BUILD_PROFILE, PAGE_WRITER_PROFILE, RESEARCHER_PROFILE, SWITCHABLE_PROFILES};
 use prompt_cache::load_system_prompt;
 use session_tree::evict_on_hibernate_or_end;
@@ -49,7 +51,6 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 
 use anyhow::Context;
-use dashmap::DashSet;
 use entanglement_core::{
     AgentProfile, EngineConfig, Holly, OutEvent, Permission, PermissionProfile, SessionId,
     SystemPromptResolver, ToolSpec, ToolSpecResolver,
@@ -91,23 +92,10 @@ pub struct SiteEngine {
     pub mcp: Arc<SiteMcp>,
     session_tool_specs: ToolSpecCache,
     system_prompt_cache: Arc<RwLock<String>>,
-    /// Root sessions this process instance has confirmed have a live in-memory
-    /// `Holly` task — either resumed via [`ensure_live`][Self::ensure_live] or
-    /// freshly spawned by `create` (see [`mark_live`][Self::mark_live]).
-    /// `Holly::resume` refuses an already-live id (see its doc), and sending
-    /// any other `InMsg` to an id this process has never touched lazily spawns
-    /// a **blank** session rather than replaying history — so callers must
-    /// resume once, before the first send, and this set is what makes that
-    /// "once" instead of "every message". Deliberately a flat per-process set,
-    /// not a generalized cache — KISS, per the issue.
-    ///
-    /// `Arc`-wrapped (rather than the bare `DashSet` this started as) so the
-    /// `hibernate_watcher` task below can hold its own clone: `Holly`'s own
-    /// idle-TTL sweep (`EngineConfig.idle_ttl`, set below) evicts a settled
-    /// session from *its* bookkeeping without this site ever calling
-    /// `hibernate` itself, so nothing else would otherwise tell this cache to
-    /// drop the id — see the watcher's doc.
-    live_sessions: Arc<DashSet<SessionId>>,
+    /// Which sessions have a live in-memory `Holly` task — see [`live`]'s
+    /// module doc for what puts an id in and what takes it out, and why
+    /// resuming without it would silently discard history.
+    live_sessions: LiveSessions,
     // Kept alive for the process lifetime (a tokio task keeps running once
     // spawned regardless of whether its `JoinHandle` is dropped, but holding
     // these documents intent and leaves room for a future graceful shutdown).
@@ -250,12 +238,12 @@ impl SiteEngine {
 
         let holly = Holly::spawn(cfg);
 
-        let live_sessions: Arc<DashSet<SessionId>> = Arc::new(DashSet::new());
+        let live_sessions = LiveSessions::default();
         // Tracks session liveness (`live_sessions`) and, for #17, sub-agent
         // parent links (`session_tree`) — both folded from the same
         // `Holly::subscribe()` broadcast `mcp.rs`/`ws_bridge.rs` also tap.
         let hibernate_watcher = {
-            let live = live_sessions.clone();
+            let live = live_sessions.handle();
             let mut sub = holly.subscribe();
             tokio::spawn(async move {
                 loop {
@@ -267,6 +255,15 @@ impl SiteEngine {
                             } = &ev
                             {
                                 record_session_started(session.clone(), parent.clone());
+                                // #101: children count as live too. A sub-agent
+                                // is never `mark_live`d by a handler (nothing
+                                // here mints its id), so without this the cache
+                                // could only ever say "unknown" for one — and
+                                // `send_message` on a child needs to tell an
+                                // already-running child (just prompt it) from a
+                                // hibernated one (resume it first), since
+                                // `Holly::resume` refuses a live id.
+                                live.insert(session.clone());
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -328,7 +325,7 @@ impl SiteEngine {
     /// Skips a wasted (and refused) `resume` if a later handler call touches
     /// the same session in this process.
     pub fn mark_live(&self, session: SessionId) {
-        self.live_sessions.insert(session);
+        self.live_sessions.mark(session);
     }
 
     /// Drop `session` from the live-tracking set — call once the engine has
@@ -337,7 +334,7 @@ impl SiteEngine {
     /// set's size over a long process lifetime rather than fixing a
     /// correctness issue.
     pub fn forget_live(&self, session: &SessionId) {
-        self.live_sessions.remove(session);
+        self.live_sessions.forget(session);
     }
 
     /// Ensure `session` has a live in-memory task before sending it a
@@ -356,8 +353,17 @@ impl SiteEngine {
         persistence::resume_session(db, &self.holly, session.clone())
             .await
             .with_context(|| format!("resuming engine session `{}`", session.0))?;
-        self.live_sessions.insert(session);
+        self.live_sessions.mark(session);
         Ok(())
+    }
+
+    /// Whether `session` already has a live in-memory task, waiting out the
+    /// watcher's own lag before answering `false` (#101) — see
+    /// [`LiveSessions::await_live`]. Callers use it to tell a sub-agent that is
+    /// still running (just prompt it) from one that has been hibernated and
+    /// needs `persistence::resume_child_session` first.
+    pub async fn await_live(&self, session: &SessionId) -> bool {
+        self.live_sessions.await_live(session).await
     }
 }
 

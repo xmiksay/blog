@@ -238,6 +238,79 @@ async fn session_for_call_awaiting_finds_a_call_that_lands_after_prior_was_read(
     cleanup_fabricated(&fx.db, &root, fx.user_id).await;
 }
 
+/// #101: whichever row an approval arrives on — the root's or the child's own
+/// — `approve` must load `prior` keyed on the **tree's root**. This pins why:
+/// a child's own uuid isn't a log key at all (its records are filed under the
+/// root, m_032), so a child-keyed load reads back nothing and *no* decision
+/// could be routed, the child's own least of all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approval_addressed_to_the_root_resolves_a_childs_pending_call() {
+    let Some(db_url) = test_db_url().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+
+    let llm_factory: entanglement_core::LlmFactory =
+        std::sync::Arc::new(|| Box::new(NeverCalledLlm));
+    let fx = setup_scripted(&db_url, "approval-root-keyed", llm_factory).await;
+
+    let root = SiteEngine::session_id_for_user(fx.user_id);
+    let child = SessionId::new_uuid();
+
+    insert(
+        &fx.db,
+        &root,
+        LogRecord::new(
+            child.clone(),
+            LogPayload::Out(OutEvent::SessionStarted {
+                session: child.clone(),
+                parent: Some(root.clone()),
+                predecessor: None,
+                profile: "researcher".into(),
+                model: None,
+                user: None,
+                root: false,
+                ts: 0,
+            }),
+        ),
+    )
+    .await;
+    insert(
+        &fx.db,
+        &root,
+        LogRecord::new(
+            child.clone(),
+            LogPayload::Out(OutEvent::ToolRequest {
+                session: child.clone(),
+                seq: 1,
+                request_id: "edit-2".into(),
+                tool: "page_edit".into(),
+                input: r#"{"path":"test/whatever","markdown":"x"}"#.into(),
+            }),
+        ),
+    )
+    .await;
+
+    let root_prior = load_records(&fx.db, &root).await;
+    let resolved = session_for_call_awaiting(&fx.db, &root, &root_prior, "edit-2")
+        .await
+        .expect("the root-keyed log carries the child's call");
+    assert_eq!(
+        resolved, child,
+        "a decision must be addressed to the session that registered the call"
+    );
+
+    // The other half of the same fact: the child's own id is not a log key.
+    let child_keyed = load_records(&fx.db, &child).await;
+    assert!(
+        child_keyed.is_empty(),
+        "a child-keyed load must read back nothing — narrowing `load_prior_records` \
+         to the row's own session would break approval routing entirely: {child_keyed:#?}"
+    );
+
+    cleanup_fabricated(&fx.db, &root, fx.user_id).await;
+}
+
 /// Case 2 (the unknown id): a `tool_call_id` that never existed anywhere in
 /// the session's history must fail fast with a `4xx`, not fall back to the
 /// root and hang for the full 180s `TURN_TIMEOUT`.

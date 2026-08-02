@@ -11,7 +11,9 @@ use super::{
     apply_live_changes, filter_owned_mcp_ids, resolve_model_with_provider, session_mcp_specs,
     validate_agent_profile,
 };
-use crate::ai::handlers::sessions::{SessionSummary, ids_to_json, load_owned, parse_id_array};
+use crate::ai::handlers::sessions::{
+    SessionSummary, ids_to_json, load_owned, parse_id_array, tree,
+};
 use crate::entity::{assistant_session, llm_model, llm_provider};
 use crate::routes::api::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -49,6 +51,11 @@ pub async fn update(
     Json(input): Json<UpdateSession>,
 ) -> ApiResult<Json<SessionSummary>> {
     let session = load_owned(&state, user_id, id).await?;
+    // Root-only (#101): a sub-agent's model/profile/generation posture comes
+    // from the profile it was spawned under, and every field here is mirrored
+    // live onto the engine session — which for a child would mean resuming its
+    // own id, the blank-resume trap `tree` documents.
+    tree::require_root(&session, "update")?;
     let session_id = session.engine_session_id.clone().map(SessionId::new);
     let existing_model_id = session.model_id;
     // Snapshot before `session` is consumed into `active` below — needed by

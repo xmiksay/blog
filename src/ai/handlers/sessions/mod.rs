@@ -15,6 +15,7 @@
 mod compact;
 mod mutate;
 pub(super) mod subagent_links;
+mod tree;
 mod turn;
 
 pub use compact::compact;
@@ -119,6 +120,10 @@ pub async fn list(
         .order_by_desc(assistant_session::Column::UpdatedAt)
         .all(&state.db)
         .await?;
+    // Still one flat array; only the order changes (#101). Sorted in Rust
+    // rather than SQL because the ordering is recursive (pre-order over the
+    // parent self-FK) — see `tree::order_for_tree`.
+    let rows = tree::order_for_tree(rows);
     Ok(Json(rows.iter().map(SessionSummary::from).collect()))
 }
 
@@ -128,13 +133,9 @@ pub async fn read(
     Path(id): Path<i32>,
 ) -> ApiResult<Json<SessionDetail>> {
     let session = load_owned(&state, user_id, id).await?;
-    // The log key is the *tree's* root (`root_engine_session_id`), never the
-    // row's own engine id: a sub-agent's records are filed under its root
-    // (#99), so keying on its own uuid would read back zero rows — and worse,
-    // resuming that uuid would materialize a blank engine session and cache it
-    // as live. The two are identical for a root row, which is why this is a
-    // no-op there.
-    let root = SessionId::new(session.root_engine_session_id.clone());
+    // The log key is the *tree's* root, never the row's own engine id — see
+    // `tree::root_engine_id`. Identical for a root row, so a no-op there.
+    let root = tree::root_engine_id(&session);
     let records = if root.0.is_empty() {
         Vec::new()
     } else {
@@ -168,24 +169,67 @@ pub async fn delete_one(
     Path(id): Path<i32>,
 ) -> ApiResult<StatusCode> {
     let session = load_owned(&state, user_id, id).await?;
-    if let Some(sid) = &session.engine_session_id {
-        let session_id = SessionId::new(sid.clone());
-        state
-            .agent_engine
-            .holly
-            .send(InMsg::CloseSession {
-                session: session_id.clone(),
-            })
-            .await
-            .map_err(|_| ApiError::Internal("engine inbox closed".into()))?;
-        persistence::delete_session_events(&state.db, &session_id)
-            .await
-            .map_err(|e| ApiError::Internal(format!("failed to delete assistant_events: {e}")))?;
-        state.agent_engine.clear_session_mcp_specs(&session_id);
-        state.agent_engine.forget_live(&session_id);
+    // A child can't be deleted on its own (#101): `delete_session_events` would
+    // match nothing (its records are filed under the root) while the row — the
+    // only thing that can read them back — disappears, leaving an unreachable
+    // transcript inside a log that is otherwise still in active use.
+    tree::require_root(&session, "delete")?;
+
+    // The self-FK cascades the descendant *rows* away, but nothing in Postgres
+    // can reach this process's engine-side bookkeeping — retire each descendant
+    // explicitly so its `live_sessions` entry and per-session MCP specs go now,
+    // and the `SessionEnded` its close emits clears `SESSION_PARENTS`.
+    // Otherwise both keep entries for rows that no longer exist.
+    let descendants = tree::descendants(&state.db, id).await?;
+    for child in &descendants {
+        if let Some(sid) = &child.engine_session_id {
+            retire_engine_session(&state, &SessionId::new(sid.clone())).await?;
+        }
     }
+
+    if let Some(sid) = &session.engine_session_id {
+        retire_engine_session(&state, &SessionId::new(sid.clone())).await?;
+    }
+    // Every log key this tree ever wrote under, not just the current one: a
+    // compaction repoints the row's `engine_session_id`/`root_engine_session_id`
+    // at the successor while pre-compaction children keep the old key, so
+    // deleting only the current key would strand the older log forever.
+    let mut log_keys: Vec<String> = descendants
+        .iter()
+        .map(|c| c.root_engine_session_id.clone())
+        .chain(session.engine_session_id.clone())
+        .chain(std::iter::once(session.root_engine_session_id.clone()))
+        .collect();
+    log_keys.sort();
+    log_keys.dedup();
+    for key in log_keys {
+        persistence::delete_session_events(&state.db, &SessionId::new(key))
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, session_id = id, "failed to delete assistant_events");
+                ApiError::Internal("internal error".into())
+            })?;
+    }
+
     session.delete(&state.db).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tell the engine to close `session` and drop this process's bookkeeping for
+/// it. `CloseSession` cascades over the engine's own spawn sub-tree, but the
+/// caches below are per-id, so each descendant still needs its own call.
+async fn retire_engine_session(state: &AppState, session: &SessionId) -> ApiResult<()> {
+    state
+        .agent_engine
+        .holly
+        .send(InMsg::CloseSession {
+            session: session.clone(),
+        })
+        .await
+        .map_err(|_| ApiError::Internal("engine inbox closed".into()))?;
+    state.agent_engine.clear_session_mcp_specs(session);
+    state.agent_engine.forget_live(session);
+    Ok(())
 }
 
 pub(super) async fn load_owned(

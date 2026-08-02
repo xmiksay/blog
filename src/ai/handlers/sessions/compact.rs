@@ -25,7 +25,7 @@ use sea_orm::{ActiveModelTrait, Set};
 
 use super::mutate::{resolve_model_with_provider, session_mcp_specs};
 use super::turn::{engine_session_id, send_and_collect, to_detail};
-use super::{SessionDetail, load_owned, parse_id_array, subagent_links};
+use super::{SessionDetail, load_owned, parse_id_array, subagent_links, tree};
 use crate::ai::engine::SiteEngine;
 use crate::ai::projection;
 use crate::entity::assistant_session;
@@ -54,6 +54,10 @@ pub async fn compact(
     Json(input): Json<CompactBody>,
 ) -> ApiResult<Json<SessionDetail>> {
     let session = load_owned(&state, user_id, id).await?;
+    // Root-only (#101): compaction forks a fresh `u{user_id}:{uuid}` successor
+    // and repoints the row at it, which for a child row would both claim a root
+    // id and cut it loose from the log its siblings are still filed under.
+    tree::require_root(&session, "compact")?;
     let source = engine_session_id(&session)?;
 
     let engine = &state.agent_engine;

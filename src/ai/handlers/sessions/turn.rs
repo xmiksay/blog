@@ -38,7 +38,9 @@ use entanglement_runtime::session_store::LogRecord;
 use routing::{open_tool_requests, remember_deny};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
+use super::tree::root_engine_id;
 use super::{MessageView, SessionDetail, SessionSummary, load_owned, subagent_links};
+use crate::ai::persistence;
 use crate::ai::projection::{self, ProjectedMessage};
 use crate::entity::{assistant_event, assistant_session};
 use crate::routes::api::error::{ApiError, ApiResult};
@@ -74,19 +76,19 @@ pub async fn send_message(
     if input.text.trim().is_empty() {
         return Err(ApiError::BadRequest("text is required".into()));
     }
-    let session_id = engine_session_id(&session)?;
-
+    // A sub-agent row is prompt-able in its own right (#101): the turn runs on
+    // the row's own engine session (`target`), while the log it reads and folds
+    // stays keyed on the tree's root — see `ensure_target_live`.
+    let target = engine_session_id(&session)?;
+    let root = root_engine_id(&session);
     let engine = &state.agent_engine;
-    engine
-        .ensure_live(&state.db, session_id.clone())
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to resume engine session: {e}")))?;
-    let prior = load_prior_records(&state.db, &session_id).await?;
+    ensure_target_live(&state, &root, &target).await?;
+    let prior = load_prior_records(&state.db, &root).await?;
 
-    let msg = InMsg::prompt(session_id.clone(), input.text);
-    let collected = collect::send_and_collect(engine, &session_id, vec![msg], Vec::new()).await?;
+    let msg = InMsg::prompt(target.clone(), input.text);
+    let collected = collect::send_and_collect(engine, &target, vec![msg], Vec::new()).await?;
 
-    build_detail(&state, id, &session_id, prior, collected).await
+    build_detail(&state, id, &target, prior, collected).await
 }
 
 /// POST /sessions/{id}/messages/{message_id}/approve
@@ -106,17 +108,19 @@ pub async fn approve(
     Json(body): Json<ApproveBody>,
 ) -> ApiResult<Json<SessionDetail>> {
     let session = load_owned(&state, user_id, id).await?;
-    let session_id = engine_session_id(&session)?;
+    let target = engine_session_id(&session)?;
+    let root = root_engine_id(&session);
     if body.decisions.is_empty() {
         return Err(ApiError::BadRequest("decisions is required".into()));
     }
 
     let engine = &state.agent_engine;
-    engine
-        .ensure_live(&state.db, session_id.clone())
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to resume engine session: {e}")))?;
-    let prior = load_prior_records(&state.db, &session_id).await?;
+    ensure_target_live(&state, &root, &target).await?;
+    // Root-keyed on purpose, even when approving from a child's own view:
+    // `session_for_call_awaiting` and `open_tool_requests` scan *every*
+    // session's records to find who owns a `tool_call_id`, so narrowing this to
+    // the child would break routing a decision to a sibling or to the root.
+    let prior = load_prior_records(&state.db, &root).await?;
 
     // `ApprovalScope::Always` on an *approve* is persisted for us by
     // `SitePolicy::GrantStore::record`, invoked internally by the engine's
@@ -143,7 +147,7 @@ pub async fn approve(
         // used to work by accident for a root-level call, but was actively
         // wrong for a stale/unknown/misrouted sub-agent call id.
         let target_session =
-            session_for_call_awaiting(&state.db, &session_id, &prior, &d.tool_call_id).await?;
+            session_for_call_awaiting(&state.db, &root, &prior, &d.tool_call_id).await?;
         if d.approve {
             msgs.push(InMsg::Approve {
                 session: target_session,
@@ -167,8 +171,50 @@ pub async fn approve(
     }
 
     let extra_pending = open_tool_requests(&prior);
-    let collected = collect::send_and_collect(engine, &session_id, msgs, extra_pending).await?;
-    build_detail(&state, id, &session_id, prior, collected).await
+    let collected = collect::send_and_collect(engine, &target, msgs, extra_pending).await?;
+    build_detail(&state, id, &target, prior, collected).await
+}
+
+/// Make sure `target` has a live in-memory engine task before a turn is driven
+/// on it (#101).
+///
+/// For a root (`target == root`) this is the plain `ensure_live` it always was.
+/// For a sub-agent child it is a three-step ladder, because a child's own id
+/// can never be handed to `ensure_live`: its `assistant_events` live under the
+/// root, so resuming that id would replay an empty log and cache a *blank*
+/// session under it forever (see `tree`'s module doc).
+///
+/// 1. Resume the **root**. A root resume cascades over its whole spawn sub-tree
+///    (ADR-0112), so a child that was live when recording stopped usually comes
+///    back with it — no child-specific work needed at all.
+/// 2. If the child is live (already running — upstream never closes a finished
+///    sub-agent, so this is the common case — or just re-materialized by that
+///    cascade), stop: `Holly::resume` refuses a live id.
+/// 3. Otherwise rebuild it from its own slice of the root's log
+///    (`persistence::resume_child_session`).
+async fn ensure_target_live(
+    state: &AppState,
+    root: &SessionId,
+    target: &SessionId,
+) -> ApiResult<()> {
+    let engine = &state.agent_engine;
+    engine
+        .ensure_live(&state.db, root.clone())
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to resume engine session: {e}")))?;
+    if target == root || engine.await_live(target).await {
+        return Ok(());
+    }
+    persistence::resume_child_session(&state.db, &engine.holly, root, target)
+        .await
+        .map_err(|e| {
+            // The child id and the underlying cause are useful in the log but
+            // not to a client, which can't act on either.
+            tracing::warn!(error = %e, child = %target.0, root = %root.0, "failed to resume sub-agent session");
+            ApiError::Conflict("this sub-agent session can no longer be resumed".into())
+        })?;
+    engine.mark_live(target.clone());
+    Ok(())
 }
 
 pub(super) fn engine_session_id(session: &assistant_session::Model) -> ApiResult<SessionId> {

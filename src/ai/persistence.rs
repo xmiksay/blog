@@ -142,6 +142,69 @@ pub async fn resume_session(
     holly: &Holly,
     root: SessionId,
 ) -> anyhow::Result<SessionId> {
+    let records = load_tree_records(db, &root).await?;
+    holly
+        .resume(root.clone(), pair_records(&records))
+        .await
+        .map_err(|_| anyhow::anyhow!("engine inbox closed"))
+}
+
+/// Resume a sub-agent **child** session on its own, from its slice of `root`'s
+/// log (#101).
+///
+/// Needed because a finished sub-agent is never `CloseSession`d upstream
+/// (`entanglement_runtime::subagent` only waits for `Done`), so a child stays
+/// prompt-able — but only while it is live. Once the idle-TTL sweep hibernates
+/// it, the id has to be rebuilt, and the plain [`resume_session`] can't do it:
+/// its `root_session_id = <child uuid>` filter matches zero rows (a child's
+/// records are filed under its root, m_032), so it would resume the child from
+/// an *empty* log and silently replace an intact transcript with a blank one.
+///
+/// The filter is on `LogRecord::session` — the tap stamps each record with the
+/// session that produced it — rather than handing `Holly` the whole tree:
+/// `pair_records` binds each `In` to the *next* `Out` regardless of session, so
+/// an unfiltered log could pair the root's own prompt onto a child event and
+/// fold a message the child never saw into its context. Narrowing first makes
+/// the pairing exact. The cost is that a grandchild is not cascaded along (its
+/// records name itself, not `child`); it resumes the same way if it is ever
+/// prompted in turn.
+///
+/// Refuses (rather than resuming blank) when the child has no records at all —
+/// that is either a wrong log key or a child whose events never landed, and in
+/// both cases materializing an empty session under its id is the exact failure
+/// this function exists to prevent.
+pub async fn resume_child_session(
+    db: &DatabaseConnection,
+    holly: &Holly,
+    root: &SessionId,
+    child: &SessionId,
+) -> anyhow::Result<()> {
+    let records = load_tree_records(db, root).await?;
+    let own: Vec<LogRecord> = records
+        .into_iter()
+        .filter(|r| r.session == *child)
+        .collect();
+    if own.is_empty() {
+        anyhow::bail!(
+            "sub-agent session `{}` has no records under root `{}`",
+            child.0,
+            root.0
+        );
+    }
+    holly
+        .resume(child.clone(), pair_records(&own))
+        .await
+        .map_err(|_| anyhow::anyhow!("engine inbox closed"))?;
+    Ok(())
+}
+
+/// `root`'s whole persisted log — the root's own records interleaved with every
+/// session spawned under it — truncated at the first gap tombstone (see
+/// [`resume_session`]'s doc for why a gap degrades rather than refuses).
+async fn load_tree_records(
+    db: &DatabaseConnection,
+    root: &SessionId,
+) -> anyhow::Result<Vec<LogRecord>> {
     let rows = assistant_event::Entity::find()
         .filter(assistant_event::Column::RootSessionId.eq(root.0.clone()))
         .order_by_asc(assistant_event::Column::Id)
@@ -164,11 +227,7 @@ pub async fn resume_session(
             root.0
         );
     }
-
-    holly
-        .resume(root.clone(), pair_records(&records))
-        .await
-        .map_err(|_| anyhow::anyhow!("engine inbox closed"))
+    Ok(records)
 }
 
 /// Truncate `records` to the prefix strictly before its first [`LogPayload::Gap`]
