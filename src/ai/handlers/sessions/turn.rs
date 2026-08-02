@@ -86,7 +86,7 @@ pub async fn send_message(
     let msg = InMsg::prompt(session_id.clone(), input.text);
     let collected = collect::send_and_collect(engine, &session_id, vec![msg], Vec::new()).await?;
 
-    build_detail(&state, id, prior, collected).await
+    build_detail(&state, id, &session_id, prior, collected).await
 }
 
 /// POST /sessions/{id}/messages/{message_id}/approve
@@ -168,7 +168,7 @@ pub async fn approve(
 
     let extra_pending = open_tool_requests(&prior);
     let collected = collect::send_and_collect(engine, &session_id, msgs, extra_pending).await?;
-    build_detail(&state, id, prior, collected).await
+    build_detail(&state, id, &session_id, prior, collected).await
 }
 
 pub(super) fn engine_session_id(session: &assistant_session::Model) -> ApiResult<SessionId> {
@@ -198,9 +198,13 @@ pub(super) async fn load_prior_records(
         .collect()
 }
 
+/// Fold `prior + collected` into this response. `target` is the session whose
+/// transcript is being returned — the one the turn ran on; any sub-agent it
+/// spawned becomes a reference card, not a nested transcript (#100).
 async fn build_detail(
     state: &AppState,
     id: i32,
+    target: &SessionId,
     prior: Vec<LogRecord>,
     collected: Vec<LogRecord>,
 ) -> ApiResult<Json<SessionDetail>> {
@@ -210,8 +214,9 @@ async fn build_detail(
     // row here rather than hoping `ws_bridge`'s independent task got there
     // first, or this very response carries a card with no session to open
     // (see `subagent_links`).
-    subagent_links::hydrate_child_rows(&state.db, &records).await;
-    let projected = projection::project(&records);
+    let child_ids = subagent_links::hydrate_child_rows(&state.db, &records).await;
+    let mut projected = projection::project(&records, target);
+    subagent_links::splice_child_db_ids(&mut projected, &child_ids);
     let session = assistant_session::Entity::find_by_id(id)
         .one(&state.db)
         .await?

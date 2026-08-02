@@ -23,8 +23,8 @@ use entanglement_core::{Llm, LlmRequest, LlmResponse, LlmStream, ToolCall, strea
 use scripted::{scripted_cleanup, scripted_session, setup_scripted};
 use serde_json::{Value, json};
 
-/// A scripted `Llm` for the `spawns_a_researcher_sub_agent_and_nests_its_
-/// progress` test: the root's first round emits `agent_spawn(researcher,
+/// A scripted `Llm` for the `spawns_a_researcher_sub_agent_and_cards_its_own_
+/// session` test: the root's first round emits `agent_spawn(researcher,
 /// "what is 2+2")`, its second round (after the spawn's own immediate tool
 /// result) just finishes with plain text. The `researcher` child (identified
 /// by its system prompt carrying `engine.rs`'s `RESEARCHER_PROMPT_SUFFIX`
@@ -74,10 +74,11 @@ impl Llm for ResearcherScriptedLlm {
 /// against the *same* user (the `SESSION_PARENTS`/`root_session_of` fix — a
 /// bare-uuid child session that failed to resolve would fail closed and the
 /// child's own turn would error out instead of answering), and
-/// `projection::project` nesting the child's turn under the spawning message.
+/// `projection::project` leaving a reference card on the spawning message
+/// whose `child_db_session_id` opens the child's own transcript (#100).
 /// DB-gated only — see `ScriptedFixture`'s doc for why no live model is used.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spawns_a_researcher_sub_agent_and_nests_its_progress() {
+async fn spawns_a_researcher_sub_agent_and_cards_its_own_session() {
     let Some(db_url) = test_db_url().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -116,9 +117,10 @@ async fn spawns_a_researcher_sub_agent_and_nests_its_progress() {
         "agent_spawn bypasses permission entirely, it must never require approval: {resp:#}"
     );
 
-    // The child runs detached (ADR-0026) — poll until its nested turn shows
-    // up fully settled instead of racing the background task.
-    let mut sub_agent_messages: Option<Value> = None;
+    // The child runs detached (ADR-0026) — poll until its card is filled in
+    // (a preview only exists once the child has actually answered) instead of
+    // racing the background task.
+    let mut card: Option<Value> = None;
     let mut detail = resp;
     for _ in 0..20 {
         let (status, resp) = send(
@@ -131,42 +133,67 @@ async fn spawns_a_researcher_sub_agent_and_nests_its_progress() {
         .await;
         assert_eq!(status, StatusCode::OK, "read session: {resp}");
         let messages = resp["messages"].as_array().cloned().unwrap_or_default();
-        if let Some(m) = messages.iter().find(|m| {
-            m["content"]["sub_agents"]
-                .as_array()
-                .is_some_and(|s| !s.is_empty())
-        }) {
-            let agents = m["content"]["sub_agents"].as_array().unwrap();
-            assert_eq!(agents[0]["profile"], json!("researcher"), "{resp:#}");
-            let child_messages = agents[0]["messages"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            if child_messages
-                .iter()
-                .any(|cm| cm["role"] == "assistant" && !cm["content"]["text"].is_null())
-            {
-                sub_agent_messages = Some(json!(child_messages));
-                break;
-            }
+        card = messages.iter().find_map(|m| {
+            let c = m["content"]["sub_agents"].as_array()?.first()?;
+            c["preview"].as_str().filter(|p| !p.is_empty())?;
+            Some(c.clone())
+        });
+        if card.is_some() {
+            break;
         }
         detail = resp;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let sub_agent_messages = sub_agent_messages.unwrap_or_else(|| {
-        panic!("researcher sub-agent never produced a nested, settled turn: {detail:#}")
+    let card = card.unwrap_or_else(|| {
+        panic!("researcher sub-agent never produced a settled card: {detail:#}")
     });
+
+    // #100: the spawning turn carries a *reference card*, not the child's
+    // transcript — profile/task/message_count/preview plus the row to open.
+    assert_eq!(card["profile"], json!("researcher"), "{card:#}");
+    assert_eq!(card["task"], json!("what is 2+2"), "{card:#}");
+    assert_eq!(card["preview"], json!("2 + 2 = 4."), "{card:#}");
+    assert_eq!(card["message_count"], json!(2), "{card:#}");
+    assert!(
+        card.get("messages").is_none(),
+        "the nested transcript is retired — the card is a pointer: {card:#}"
+    );
+    let child_db_id = card["child_db_session_id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("card carries no child row to open: {card:#}"));
+
+    // …and the transcript itself is read by opening that row: the child's own
+    // messages at top level, no nesting anywhere.
+    let (status, child) = send(
+        &fx.app,
+        "GET",
+        &format!("/assistant/sessions/{child_db_id}"),
+        &fx.cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "read child session: {child}");
+    assert_eq!(child["parent_session_id"], json!(db_session_id));
+    assert_eq!(child["agent_profile"], json!("researcher"));
     // entanglement-runtime 0.3 (#421) now synthesizes the child's own
     // spawn-initiating `InMsg::Prompt` into its persisted log (previously only
     // the assistant's eventual reply was recorded), so replay — and this
     // projection — surfaces the researcher's framing task as a leading user
     // message alongside its answer.
+    let child_messages: Vec<Value> = child["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| json!({ "role": m["role"], "content": m["content"] }))
+        .collect();
     assert_eq!(
-        sub_agent_messages,
+        json!(child_messages),
         json!([
             { "role": "user", "content": { "text": "what is 2+2" } },
             { "role": "assistant", "content": { "text": "2 + 2 = 4.", "tool_calls": [] } },
-        ])
+        ]),
+        "{child:#}"
     );
 
     scripted_cleanup(&fx, db_session_id).await;

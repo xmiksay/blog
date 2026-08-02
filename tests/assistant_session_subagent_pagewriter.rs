@@ -131,12 +131,13 @@ async fn approves_a_page_writer_sub_agents_own_pending_tool_call() {
         "no agent_spawn/agent call: {resp:#}"
     );
 
-    // Poll until the page-writer child's own page_edit call shows up,
-    // pending approval, nested under the spawning turn.
+    // #100: the spawning turn carries a reference card, not the child's
+    // transcript — so the pending call is found by *opening the child's own
+    // session row*, exactly as the admin UI now does.
     let mut call_id: Option<String> = None;
     let mut detail = resp;
     for _ in 0..20 {
-        let (status, resp) = send(
+        let (status, root) = send(
             &fx.app,
             "GET",
             &format!("/assistant/sessions/{db_session_id}"),
@@ -144,33 +145,50 @@ async fn approves_a_page_writer_sub_agents_own_pending_tool_call() {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "read session: {resp}");
-        let messages = resp["messages"].as_array().cloned().unwrap_or_default();
-        for m in &messages {
-            let Some(agents) = m["content"]["sub_agents"].as_array() else {
-                continue;
-            };
-            for agent in agents {
-                let child_messages = agent["messages"].as_array().cloned().unwrap_or_default();
-                // `ToolCall` (display) and `ToolRequest` (the approval pause)
-                // are two separate, separately-persisted events — a poll can
-                // land between them and see `tool_calls` populated but
-                // `requires_approval` still false. Only treat the call as
-                // ready once both have landed; otherwise keep polling instead
-                // of asserting on a transiently-incomplete read.
-                if let Some(cm) = child_messages.iter().find(|cm| {
-                    cm["content"]["requires_approval"] == json!(true)
-                        && cm["content"]["tool_calls"]
-                            .as_array()
-                            .is_some_and(|c| c.iter().any(|tc| tc["name"] == json!("page_edit")))
-                }) {
-                    call_id = cm["content"]["tool_calls"][0]["id"]
-                        .as_str()
-                        .map(String::from);
-                }
-            }
+        assert_eq!(status, StatusCode::OK, "read session: {root}");
+        let child_db_id = root["messages"].as_array().and_then(|messages| {
+            messages.iter().find_map(|m| {
+                let card = m["content"]["sub_agents"].as_array()?.first()?;
+                assert!(
+                    card.get("messages").is_none(),
+                    "the nested transcript is retired: {card:#}"
+                );
+                card["child_db_session_id"].as_i64()
+            })
+        });
+        if let Some(child_db_id) = child_db_id {
+            let (status, child) = send(
+                &fx.app,
+                "GET",
+                &format!("/assistant/sessions/{child_db_id}"),
+                &fx.cookie,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "read child session: {child}");
+            assert_eq!(child["parent_session_id"], json!(db_session_id));
+            // `ToolCall` (display) and `ToolRequest` (the approval pause) are
+            // two separate, separately-persisted events — a poll can land
+            // between them and see `tool_calls` populated but
+            // `requires_approval` still false. Only treat the call as ready
+            // once both have landed; otherwise keep polling instead of
+            // asserting on a transiently-incomplete read.
+            call_id = child["messages"].as_array().and_then(|messages| {
+                messages
+                    .iter()
+                    .find(|cm| {
+                        cm["content"]["requires_approval"] == json!(true)
+                            && cm["content"]["tool_calls"].as_array().is_some_and(|c| {
+                                c.iter().any(|tc| tc["name"] == json!("page_edit"))
+                            })
+                    })
+                    .and_then(|cm| cm["content"]["tool_calls"][0]["id"].as_str())
+                    .map(String::from)
+            });
+            detail = child;
+        } else {
+            detail = root;
         }
-        detail = resp;
         if call_id.is_some() {
             break;
         }

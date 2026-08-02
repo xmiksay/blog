@@ -1,9 +1,8 @@
 <script setup lang="ts">
 // Renders one `{role, content}` pair from the assistant chat transcript.
-// Used both for top-level `AssistantSessionDetail.messages` entries and,
-// recursively (via `messageId` threaded straight through — the approve
-// endpoint ignores it, see `assistant.approveToolCalls`), for the nested
-// `content.sub_agents[].messages` a sub-agent's own turn produces.
+// No longer self-recursive: since #100 a spawned sub-agent contributes a
+// reference card (`content.sub_agents[]`, no `messages`) instead of a nested
+// transcript, and its own messages are rendered by opening that session.
 import { computed, ref } from 'vue'
 import { useAssistantStore } from '../stores/assistant'
 import { renderMarkdown } from '../composables/useMarkdown'
@@ -194,26 +193,21 @@ async function decideAll(calls: ToolCallView[], approve: boolean, remember = fal
         Always reject all
       </button>
     </div>
-    <details
+    <!-- A sub-agent is its own session (#99), so this is a reference card, not
+         a nested transcript. Selecting it from here is #103's job; until then
+         it stays a static summary rather than an empty disclosure. -->
+    <div
       v-for="sa in subAgents"
       :key="sa.agent_id"
-      class="ml-2 border-l-2 border-gray-200 pl-2"
+      class="ml-2 border-l-2 border-gray-200 pl-2 py-1 text-xs text-gray-500 space-y-0.5"
     >
-      <summary class="cursor-pointer text-xs text-gray-500">
+      <div>
         {{ profileIcon(sa.profile) }} {{ sa.profile }}
         <span v-if="sa.task" class="text-gray-400">— {{ sa.task }}</span>
-      </summary>
-      <div class="mt-1 space-y-1">
-        <AssistantMessageContent
-          v-for="(sm, j) in sa.messages"
-          :key="j"
-          :role="sm.role"
-          :content="sm.content"
-          :message-id="messageId"
-          @decided="emit('decided')"
-        />
+        <span class="text-gray-400">({{ sa.message_count }} messages)</span>
       </div>
-    </details>
+      <div v-if="sa.preview" class="text-gray-600 italic">{{ sa.preview }}</div>
+    </div>
   </div>
   <div v-else-if="role === 'tool_result'" class="text-xs ml-2">
     <details

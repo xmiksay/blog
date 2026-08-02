@@ -1,6 +1,12 @@
 //! Hydrates sub-agent `assistant_sessions` rows straight from a session's
 //! persisted log (#99) — the second of the two writers described in
-//! `ai::ws_bridge::child_rows`.
+//! `ai::ws_bridge::child_rows` — and splices the resulting row ids onto the
+//! projection's sub-agent cards (#100), which is what makes a card clickable.
+//!
+//! The splice lives here rather than in `ai::projection` on purpose: the
+//! projection is a pure fold with no DB access (that is why it can be unit
+//! tested without a database at all), and `engine SessionId -> row id` is
+//! knowledge only a handler holding a `DatabaseConnection` has.
 //!
 //! ## Why a handler-side writer at all
 //!
@@ -21,13 +27,17 @@
 //! the parent row `ensure_child_row` refuses to guess at is always already
 //! written by the time the grandchild is reached.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use entanglement_core::{OutEvent, SessionId};
 use entanglement_runtime::session_store::{LogPayload, LogRecord};
-use sea_orm::DatabaseConnection;
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use serde_json::{Value, json};
 
+use crate::ai::projection::ProjectedMessage;
 use crate::ai::ws_bridge::child_rows::ensure_child_row;
+use crate::entity::assistant_session;
 
 /// Ensure every sub-agent session named by `records` has its own row,
 /// returning `engine SessionId -> assistant_sessions.id` for the ones that do.
@@ -42,17 +52,87 @@ pub async fn hydrate_child_rows(
     let mut ids = HashMap::new();
     for (child, parent, profile) in child_session_starts(records) {
         if let Some(id) = ensure_child_row(db, child, parent, profile).await {
+            repair_profile(db, id, profile).await;
             ids.insert(child.clone(), id);
         }
     }
     ids
 }
 
-/// Every `(child, parent, profile)` a spawn announced, in log order. A root's
-/// own `SessionStarted` (`parent: None`) is not a child and no other record
-/// shape carries a parent link, so this is the whole of the tree structure the
-/// log records.
+/// Re-point a child row at the profile it was actually spawned under.
+///
+/// Needed because the two writers can disagree: `ws_bridge`'s live writer
+/// takes the profile off whichever `SessionStarted` it happens to see, and on
+/// a resume that is the replay's degraded `build` (above), while the log this
+/// walks still carries the original. Whichever writer wins the
+/// `ON CONFLICT DO NOTHING` insert, the row ends up correct before the
+/// response that reads it is built.
+///
+/// A conditional `UPDATE` rather than a read-modify-write `ActiveModel`: it is
+/// a no-op write in the overwhelmingly common case (profiles already agree)
+/// and can't lose a concurrent hydration's identical write.
+async fn repair_profile(db: &DatabaseConnection, id: i32, profile: &str) {
+    let res = assistant_session::Entity::update_many()
+        .col_expr(
+            assistant_session::Column::AgentProfile,
+            Expr::value(profile.to_string()),
+        )
+        .col_expr(
+            assistant_session::Column::Title,
+            Expr::value(format!("{profile} sub-agent")),
+        )
+        .filter(assistant_session::Column::Id.eq(id))
+        .filter(assistant_session::Column::AgentProfile.ne(profile))
+        .exec(db)
+        .await;
+    if let Err(e) = res {
+        tracing::warn!(error = %e, session_id = id, profile, "failed to repair sub-agent profile");
+    }
+}
+
+/// Splice `child_db_session_id` onto every sub-agent card in `projected`,
+/// looked up by the card's own `agent_id` (the child's engine `SessionId`).
+///
+/// A card whose child has no row — [`hydrate_child_rows`] skipped it, or it
+/// belongs to a session tree this user doesn't own — is left without the key
+/// rather than given a null: the client's "openable" test is the key's
+/// presence, and inventing an id it can't open is worse than a card that
+/// stays flat.
+pub fn splice_child_db_ids(projected: &mut [ProjectedMessage], ids: &HashMap<SessionId, i32>) {
+    for msg in projected.iter_mut() {
+        let Some(cards) = msg
+            .content
+            .get_mut("sub_agents")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for card in cards.iter_mut() {
+            let Some(agent_id) = card.get("agent_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(db_id) = ids.get(&SessionId::new(agent_id.to_string())).copied() else {
+                continue;
+            };
+            if let Some(obj) = card.as_object_mut() {
+                obj.insert("child_db_session_id".into(), json!(db_id));
+            }
+        }
+    }
+}
+
+/// Every `(child, parent, profile)` a spawn announced, in log order, **once
+/// per child**. A root's own `SessionStarted` (`parent: None`) is not a child
+/// and no other record shape carries a parent link, so this is the whole of
+/// the tree structure the log records.
+///
+/// First announcement wins: a resume re-announces `SessionStarted` for every
+/// re-materialized child, and 0.6's replay rebuilds a session under the base
+/// `build` profile (`session/replay.rs` only switches profile on a later
+/// `AgentChanged`), so the *later* record names the wrong agent — see
+/// [`repair_profile`].
 fn child_session_starts(records: &[LogRecord]) -> Vec<(&SessionId, &SessionId, &str)> {
+    let mut seen = HashSet::new();
     records
         .iter()
         .filter_map(|r| match &r.payload {
@@ -61,7 +141,7 @@ fn child_session_starts(records: &[LogRecord]) -> Vec<(&SessionId, &SessionId, &
                 parent: Some(parent),
                 profile,
                 ..
-            }) => Some((session, parent, profile.as_str())),
+            }) if seen.insert(session) => Some((session, parent, profile.as_str())),
             _ => None,
         })
         .collect()
@@ -130,6 +210,86 @@ mod tests {
                 (&child, &root, "researcher"),
                 (&grandchild, &child, "page-writer"),
             ]
+        );
+    }
+
+    /// A resume re-announces every re-materialized child, and 0.6's replay
+    /// rebuilds it under the base `build` profile — so the second
+    /// announcement names the wrong agent and must not be what a row is
+    /// written (or repaired) from.
+    #[test]
+    fn keeps_only_a_childs_first_announcement() {
+        let root = SessionId::new("u1:root".to_string());
+        let child = SessionId::new_uuid();
+        let records = vec![
+            started(&root, None, "build"),
+            started(&child, Some(&root), "page-writer"),
+            // The resume cascade's re-announcement.
+            started(&child, Some(&root), "build"),
+        ];
+
+        assert_eq!(
+            child_session_starts(&records),
+            vec![(&child, &root, "page-writer")]
+        );
+    }
+
+    fn carded(agent_ids: &[&str]) -> ProjectedMessage {
+        ProjectedMessage {
+            role: "assistant",
+            content: json!({
+                "text": Value::Null,
+                "tool_calls": [],
+                "sub_agents": agent_ids
+                    .iter()
+                    .map(|id| json!({ "agent_id": id, "profile": "researcher" }))
+                    .collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    /// Each card gets the row id of the child *it* names — matching is by
+    /// `agent_id`, never by position, since two cards can sit on one message.
+    #[test]
+    fn splices_each_card_by_its_own_agent_id() {
+        let a = SessionId::new_uuid();
+        let b = SessionId::new_uuid();
+        let mut projected = vec![
+            ProjectedMessage {
+                role: "user",
+                content: json!({ "text": "go" }),
+            },
+            carded(&[&a.0, &b.0]),
+        ];
+        let ids = HashMap::from([(a.clone(), 11), (b.clone(), 22)]);
+
+        splice_child_db_ids(&mut projected, &ids);
+
+        let cards = projected[1].content["sub_agents"]
+            .as_array()
+            .expect("cards");
+        assert_eq!(cards[0]["child_db_session_id"], json!(11));
+        assert_eq!(cards[1]["child_db_session_id"], json!(22));
+        // Untouched: a message with no cards must come through unchanged.
+        assert_eq!(projected[0].content, json!({ "text": "go" }));
+    }
+
+    /// A child hydration couldn't place gets no key at all — the client tests
+    /// for presence, so a null would render an unopenable "openable" card.
+    #[test]
+    fn leaves_an_unknown_child_without_a_db_id() {
+        let unknown = SessionId::new_uuid();
+        let mut projected = vec![carded(&[&unknown.0])];
+
+        splice_child_db_ids(&mut projected, &HashMap::new());
+
+        let cards = projected[0].content["sub_agents"]
+            .as_array()
+            .expect("cards");
+        assert!(
+            cards[0].get("child_db_session_id").is_none(),
+            "{:#}",
+            cards[0]
         );
     }
 }

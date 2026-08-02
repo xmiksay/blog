@@ -187,11 +187,21 @@ export interface LiveTurn {
  * never re-derive it by index. `messages` never contains a `role: "user"`
  * entry — that's what `task` is for.
  */
+/**
+ * A reference card for a sub-agent session spawned by this message (#100).
+ * It carries no transcript: since every sub-agent is an `assistant_sessions`
+ * row of its own, the messages are read by opening `child_db_session_id` —
+ * absent only when the server couldn't place the child's row, in which case
+ * the card renders flat rather than as a dead link.
+ */
 export interface AssistantSubAgent {
   agent_id: string
   profile: string
   task: string
-  messages: Array<{ role: string; content: any }>
+  message_count: number
+  /** The child's last assistant text, truncated; empty while it is thinking. */
+  preview: string
+  child_db_session_id?: number
 }
 
 /**

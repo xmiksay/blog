@@ -25,15 +25,17 @@
 //! heuristic, not a structural guarantee; a future engine release exposing a
 //! real flag on `ToolOutput` should replace it.
 //!
-//! ## Sub-agent (#17) nesting
+//! ## Sub-agent (#17, #100) reference cards
 //!
 //! `assistant_events` rows for a whole session tree (a root plus any
 //! `researcher`/`page-writer` children it spawned) all share one
 //! `root_session_id` — so `records` here can contain several sessions' worth
-//! of interleaved rows. [`project`] partitions them by `LogRecord.session`
-//! and hands every non-root session's records to [`subagents`] to fold and
-//! attach — see that module's doc for the structural (not positional)
-//! child-to-spawning-call matching.
+//! of interleaved rows. [`project`] folds **one** of them (`target`) and
+//! hands every other session's records to [`subagents`], which attaches a
+//! *reference card* — profile, task, message count, preview, no nested
+//! transcript — to the spawning tool call. See that module's doc for the
+//! structural (not positional) child-to-spawning-call matching, and for why
+//! nesting the child's whole transcript here was retired in #100.
 //!
 //! ## Reasoning (#98)
 //!
@@ -68,23 +70,27 @@ pub struct ProjectedMessage {
     pub content: Value,
 }
 
-/// Fold a root session's ordered event log into projected messages, nesting
-/// any sub-agent (#17) children under the turn that spawned them (see the
-/// module doc). Records must be in the order they were appended
-/// (`assistant_events` ordered by `id`, i.e. insertion order) — this is a
-/// linear fold, not a sort. The very first record's session is taken as the
-/// root — always true in practice, since a sub-agent session cannot exist
-/// before its root does.
-pub fn project(records: &[LogRecord]) -> Vec<ProjectedMessage> {
-    let Some(root) = records.first().map(|r| r.session.clone()) else {
-        return Vec::new();
-    };
-
+/// Fold **one** session's ordered event log into projected messages, leaving a
+/// reference card on the turn that spawned each of its sub-agent (#17)
+/// children (see the module doc). Records must be in the order they were
+/// appended (`assistant_events` ordered by `id`, i.e. insertion order) — this
+/// is a linear fold, not a sort.
+///
+/// `records` is the whole session tree's log (every descendant's rows are
+/// filed under one `root_session_id`); `target` picks which session in it is
+/// being read. A `target` no record belongs to — an unknown id, or an empty
+/// log — projects to an empty transcript, never a panic: a session row can
+/// legitimately exist before its first event is persisted.
+///
+/// Every session is reachable by its own `assistant_sessions` row since #99,
+/// so this deliberately does *not* recurse: a grandchild is a card on the
+/// child's transcript, reached by opening the child, not a nested array here.
+pub fn project(records: &[LogRecord], target: &SessionId) -> Vec<ProjectedMessage> {
     let mut own: Vec<&LogRecord> = Vec::new();
     let mut child_records: HashMap<SessionId, Vec<&LogRecord>> = HashMap::new();
     let mut child_profiles: HashMap<SessionId, String> = HashMap::new();
     for record in records {
-        if record.session == root {
+        if &record.session == target {
             own.push(record);
             continue;
         }

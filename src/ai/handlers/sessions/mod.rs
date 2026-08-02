@@ -128,28 +128,37 @@ pub async fn read(
     Path(id): Path<i32>,
 ) -> ApiResult<Json<SessionDetail>> {
     let session = load_owned(&state, user_id, id).await?;
-    let records = match &session.engine_session_id {
-        Some(sid) => {
-            let session_id = SessionId::new(sid.clone());
-            // So a freshly-restarted server can still show history for an old
-            // session — best-effort: a resume hiccup shouldn't fail a read
-            // when `assistant_events` (the actual source of truth here) is
-            // fine regardless of the in-memory task's state.
-            if let Err(e) = state
-                .agent_engine
-                .ensure_live(&state.db, session_id.clone())
-                .await
-            {
-                tracing::warn!(error = %e, session_id = %sid, "failed to resume engine session for read");
-            }
-            turn::load_prior_records(&state.db, &session_id).await?
+    // The log key is the *tree's* root (`root_engine_session_id`), never the
+    // row's own engine id: a sub-agent's records are filed under its root
+    // (#99), so keying on its own uuid would read back zero rows — and worse,
+    // resuming that uuid would materialize a blank engine session and cache it
+    // as live. The two are identical for a root row, which is why this is a
+    // no-op there.
+    let root = SessionId::new(session.root_engine_session_id.clone());
+    let records = if root.0.is_empty() {
+        Vec::new()
+    } else {
+        // So a freshly-restarted server can still show history for an old
+        // session — best-effort: a resume hiccup shouldn't fail a read when
+        // `assistant_events` (the actual source of truth here) is fine
+        // regardless of the in-memory task's state.
+        if let Err(e) = state
+            .agent_engine
+            .ensure_live(&state.db, root.clone())
+            .await
+        {
+            tracing::warn!(error = %e, session_id = %root.0, "failed to resume engine session for read");
         }
-        None => Vec::new(),
+        turn::load_prior_records(&state.db, &root).await?
     };
     // Rebuild any sub-agent row `ws_bridge`'s live writer hasn't landed (or
     // lost to a lagged broadcast) before projecting — see `subagent_links`.
-    subagent_links::hydrate_child_rows(&state.db, &records).await;
-    let projected = crate::ai::projection::project(&records);
+    let child_ids = subagent_links::hydrate_child_rows(&state.db, &records).await;
+    // Fold only this row's own session out of the tree's log; its children
+    // become reference cards pointing at their own rows.
+    let target = SessionId::new(session.engine_session_id.clone().unwrap_or_default());
+    let mut projected = crate::ai::projection::project(&records, &target);
+    subagent_links::splice_child_db_ids(&mut projected, &child_ids);
     Ok(Json(turn::to_detail(&session, projected)))
 }
 

@@ -4,65 +4,6 @@
 
 use super::*;
 
-fn reasoning(s: &SessionId, seq: u64, text: &str) -> LogRecord {
-    rec(
-        s,
-        out(OutEvent::ReasoningDelta {
-            session: s.clone(),
-            seq,
-            text: text.into(),
-        }),
-    )
-}
-
-fn text_delta(s: &SessionId, seq: u64, text: &str) -> LogRecord {
-    rec(
-        s,
-        out(OutEvent::TextDelta {
-            session: s.clone(),
-            seq,
-            text: text.into(),
-        }),
-    )
-}
-
-fn tool_call(s: &SessionId, seq: u64, id: &str, tool: &str) -> LogRecord {
-    rec(
-        s,
-        out(OutEvent::ToolCall {
-            session: s.clone(),
-            seq,
-            request_id: id.into(),
-            tool: tool.into(),
-            input: "{}".into(),
-        }),
-    )
-}
-
-fn tool_output(s: &SessionId, seq: u64, id: &str, tool: &str, output: &str) -> LogRecord {
-    rec(
-        s,
-        out(OutEvent::ToolOutput {
-            session: s.clone(),
-            seq,
-            request_id: id.into(),
-            tool: tool.into(),
-            output: output.into(),
-            content: vec![],
-        }),
-    )
-}
-
-fn done(s: &SessionId, seq: u64) -> LogRecord {
-    rec(
-        s,
-        out(OutEvent::Done {
-            session: s.clone(),
-            seq,
-        }),
-    )
-}
-
 /// Consecutive `ReasoningDelta`s coalesce into one `reasoning` string on the
 /// same assistant message the turn's text lands on.
 #[test]
@@ -82,7 +23,7 @@ fn reasoning_deltas_fold_onto_the_assistant_message() {
         done(&s, 4),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected,
         vec![
@@ -109,7 +50,7 @@ fn a_turn_without_reasoning_omits_the_key_entirely() {
     let s = SessionId::new("u1:test");
     let records = vec![text_delta(&s, 1, "hi"), done(&s, 2)];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(projected.len(), 1);
     assert!(
         projected[0].content.get("reasoning").is_none(),
@@ -128,7 +69,7 @@ fn reasoning_text_and_tool_calls_share_one_assistant_message() {
         tool_output(&s, 4, "call-1", "page_search", "one match"),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected[0],
         ProjectedMessage {
@@ -155,7 +96,7 @@ fn a_reasoning_only_turn_still_emits_an_assistant_message() {
     let s = SessionId::new("u1:test");
     let records = vec![reasoning(&s, 1, "Hmm, nothing to do."), done(&s, 2)];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected,
         vec![ProjectedMessage {
@@ -194,7 +135,7 @@ fn two_tool_rounds_split_reasoning_across_two_assistant_messages() {
         done(&s, 8),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     let roles: Vec<&str> = projected.iter().map(|m| m.role).collect();
     assert_eq!(
         roles,
@@ -215,55 +156,43 @@ fn two_tool_rounds_split_reasoning_across_two_assistant_messages() {
     );
 }
 
-/// A sub-agent child's own reasoning folds onto the child's nested message,
-/// not the root's — the child is folded by the same `fold` and attached under
-/// the spawning call.
+/// A sub-agent child's own reasoning belongs to the child's own transcript,
+/// never the root's: reasoning is folded per session, so the root's
+/// projection must carry none of it — not even by way of the card, which is a
+/// pointer and has no reasoning field at all.
 #[test]
-fn sub_agent_reasoning_lands_on_the_child_fold() {
+fn sub_agent_reasoning_lands_on_the_childs_own_transcript() {
     let root = SessionId::new("u1:root");
     let child = SessionId::new("3fa85f64-5717-4562-b3fc-2c963f66afa6");
     let records = vec![
         tool_call(&root, 1, "spawn-1", "agent_spawn"),
-        rec(
-            &child,
-            out(OutEvent::SessionStarted {
-                session: child.clone(),
-                parent: Some(root.clone()),
-                predecessor: None,
-                profile: "researcher".into(),
-                model: None,
-                user: None,
-                root: false,
-                ts: 0,
-            }),
-        ),
+        session_started(&child, &root, "researcher"),
         reasoning(&child, 1, "The child is thinking."),
         text_delta(&child, 2, "Answer."),
         done(&child, 3),
-        tool_output(
-            &root,
-            2,
-            "spawn-1",
-            "agent_spawn",
-            &format!("Sub-agent launched. agent_id: {}.", child.0),
-        ),
+        tool_output(&root, 2, "spawn-1", "agent_spawn", &spawn_reply(&child)),
         done(&root, 3),
     ];
 
-    let projected = project(&records);
-    let sub_agents = projected[0].content["sub_agents"]
-        .as_array()
-        .expect("spawning message carries its child");
+    let from_child = project(&records, &child);
     assert_eq!(
-        sub_agents[0]["messages"][0]["content"],
+        from_child[0].content,
         json!({
             "text": "Answer.",
             "reasoning": "The child is thinking.",
             "tool_calls": [],
         })
     );
+
+    let from_root = project(&records, &root);
     assert!(
-        projected[0].content.get("reasoning").is_none(),
-        "the root never thought — the child's reasoning must not leak up: {projected:#?}"
+        from_root[0].content["sub_agents"][0]
+            .get("reasoning")
+            .is_none(),
+        "a card is a pointer, it carries no thinking: {from_root:#?}"
+    );
+    assert!(
+        from_root[0].content.get("reasoning").is_none(),
+        "the root never thought — the child's reasoning must not leak up: {from_root:#?}"
     );
 }

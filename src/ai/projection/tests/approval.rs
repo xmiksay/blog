@@ -72,7 +72,7 @@ fn tool_call_with_approval_pause_projects_full_round_trip() {
         ),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected,
         vec![
@@ -181,7 +181,7 @@ fn auto_allowed_call_sharing_a_batch_with_a_gated_call_is_marked_resolved_not_pe
         ),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     let assistant_msg = &projected[0];
     assert_eq!(assistant_msg.role, "assistant");
     assert_eq!(
@@ -293,7 +293,7 @@ fn a_decision_orphaned_by_an_earlier_flush_still_marks_its_call_resolved() {
         }),
     ));
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     let assistant_msg = &projected[0];
     assert_eq!(assistant_msg.role, "assistant");
     // `decisions` only ever recorded call-a — call-b's approval was orphaned,

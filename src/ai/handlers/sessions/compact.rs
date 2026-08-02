@@ -189,8 +189,15 @@ pub async fn compact(
 
     publish_compacted(&state, user_id, id, &compacted, &successor);
 
-    subagent_links::hydrate_child_rows(&state.db, &collected).await;
-    let projected = projection::project(&collected);
+    let child_ids = subagent_links::hydrate_child_rows(&state.db, &collected).await;
+    // The **successor**, not the source: this response is the successor's
+    // opening transcript (its seeded prompt plus whatever that first turn
+    // produced). `project` used to infer its target from `collected`'s first
+    // record, which happened to be the successor's synthesized prompt spliced
+    // in above — correct only by accident, and silently wrong the moment that
+    // splice moves.
+    let mut projected = projection::project(&collected, &successor);
+    subagent_links::splice_child_db_ids(&mut projected, &child_ids);
     Ok(Json(to_detail(&updated, projected)))
 }
 

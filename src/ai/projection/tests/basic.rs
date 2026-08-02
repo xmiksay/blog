@@ -42,7 +42,7 @@ fn text_only_turn_projects_user_then_assistant() {
         ),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected,
         vec![
@@ -84,7 +84,7 @@ fn tool_error_output_is_flagged() {
             }),
         ),
     ];
-    let projected = project(&records);
+    let projected = project(&records, &s);
     let tool_result = &projected[1];
     assert_eq!(tool_result.role, "tool_result");
     assert_eq!(tool_result.content["is_error"], json!(true));
@@ -111,7 +111,7 @@ fn error_event_flushes_open_turn_and_projects_error_message() {
             }),
         ),
     ];
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected,
         vec![
@@ -169,7 +169,7 @@ fn ambiguous_retry_is_ignored_and_text_deltas_around_it_still_coalesce() {
         ),
     ];
 
-    let projected = project(&records);
+    let projected = project(&records, &s);
     assert_eq!(
         projected,
         vec![ProjectedMessage {

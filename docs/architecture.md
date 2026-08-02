@@ -462,14 +462,29 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   to `entanglement_runtime`'s own guarantees either way: it exists solely
   because `DbSink`'s async writer task gives no read-your-writes guarantee at
   the instant this handler observes e.g. `Done`.
-- `projection/` — pure fold of a session's `assistant_events` rows into the
-  `{role, content}` shape the admin client renders (`role` one of
-  `user | assistant | tool_result | error`). Since #17, `assistant_events`
-  for a session tree can hold several sessions' interleaved rows (a root plus
-  any sub-agent children); `project` partitions by session, folding a child's
-  own records independently and attaching them as a `content.sub_agents:
-  [{agent_id, profile, task, messages}]` array on the assistant message whose
-  `tool_calls` include the call that produced them. The match is *structural*,
+- `projection/` — pure fold of **one** session's `assistant_events` rows into
+  the `{role, content}` shape the admin client renders (`role` one of
+  `user | assistant | tool_result | error`). `assistant_events` for a whole
+  session tree holds every descendant's interleaved rows under one
+  `root_session_id`, so `project(records, target)` takes the session to fold
+  explicitly (#100) — the callers pass the row's own `engine_session_id`
+  (`read`, `send_message`/`approve`) or, after a compaction, the **successor**
+  (`compact`). An unknown or empty `target` projects an empty transcript, not
+  a panic.
+  Every *other* session in the log becomes a **reference card**
+  `content.sub_agents: [{agent_id, profile, task, message_count, preview}]` on
+  the assistant message whose `tool_calls` include the call that produced it —
+  no nested `messages`: since #99 a sub-agent is an `assistant_sessions` row
+  of its own, so its transcript is read by opening that row, and
+  `handlers/sessions/subagent_links.rs` splices the `child_db_session_id` to
+  open onto each card after hydration (keeping the fold itself DB-free and
+  unit-testable). `preview` is the child's last assistant text, truncated, so
+  the parent transcript still reads without a click. This retires the old
+  `role: "sub_agents"` leftover message, which was the invisible-grandchild
+  bug: a grandchild matched no call in the root's own fold and landed in a
+  bucket `AssistantMessageContent.vue` has no branch for, rendering as
+  nothing. It now cards normally on its own parent's transcript. The match is
+  *structural*,
   not positional: `InMsg::Spawn` is never persisted, so there's no direct
   field linking a `ToolCall` to the `SessionId` it produced, but
   `entanglement_runtime::subagent::launch`'s own reply text always names the
@@ -526,6 +541,13 @@ agentic loop — one `Holly` actor for every tenant, sessions namespaced
   `mcp_servers.rs`, `providers.rs` (CRUD + `providers/status`, live
   per-provider throttle posture from `SiteCatalog::throttle_statuses()`,
   #89), `models.rs` (`context_window` field, #40), `permissions.rs`.
+  - **Reading a session (#100):** `GET /sessions/{id}` resumes and loads the
+    *tree's* log by the row's `root_engine_session_id`, then projects the
+    row's own `engine_session_id` out of it — identical for a root row (the
+    two columns match), and what makes a sub-agent row return its own
+    transcript at top level instead of an empty one. Keying the load on a
+    child's own uuid would both read zero rows and resume a blank engine
+    session under that id.
   - **Live model/generation/profile switching (`sessions/mod.rs`,
     `sessions/mutate/generation.rs`, #42):** `POST /sessions` and
     `PATCH /sessions/{id}` accept optional `temperature`/`reasoning_effort`/

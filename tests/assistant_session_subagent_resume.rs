@@ -270,9 +270,9 @@ async fn resume_replays_a_live_sub_agent_from_the_db_log_alone() {
 
     // First touch: `GET` resumes the root, which — thanks to ADR-0112 —
     // cascades the still-parked `page-writer` child back to life too, purely
-    // from the rows just inserted above. Assert the projection already nests
-    // the child's pending call under the spawning message, sourced entirely
-    // from the replayed log.
+    // from the rows just inserted above. The root's own projection carries a
+    // reference card for the child (#100); the pending call itself lives in
+    // the child's own transcript, one `GET` away.
     let (status, resp) = send(
         &fx.app,
         "GET",
@@ -283,15 +283,32 @@ async fn resume_replays_a_live_sub_agent_from_the_db_log_alone() {
     .await;
     assert_eq!(status, StatusCode::OK, "read session: {resp}");
     let messages = resp["messages"].as_array().cloned().unwrap_or_default();
-    let call_id = messages
+    let child_db_id = messages
         .iter()
         .find_map(|m| {
-            let agents = m["content"]["sub_agents"].as_array()?;
-            let agent = agents
+            let cards = m["content"]["sub_agents"].as_array()?;
+            let card = cards
                 .iter()
-                .find(|a| a["profile"] == json!("page-writer"))?;
-            let child_messages = agent["messages"].as_array()?;
-            let pending = child_messages.iter().find(|cm| {
+                .find(|c| c["profile"] == json!("page-writer"))?;
+            card["child_db_session_id"].as_i64()
+        })
+        .unwrap_or_else(|| {
+            panic!("the resumed root carries no openable page-writer card: {resp:#}")
+        });
+
+    let (status, child_detail) = send(
+        &fx.app,
+        "GET",
+        &format!("/assistant/sessions/{child_db_id}"),
+        &fx.cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "read child session: {child_detail}");
+    let call_id = child_detail["messages"]
+        .as_array()
+        .and_then(|messages| {
+            let pending = messages.iter().find(|cm| {
                 cm["content"]["requires_approval"] == json!(true)
                     && cm["content"]["tool_calls"]
                         .as_array()
@@ -302,11 +319,13 @@ async fn resume_replays_a_live_sub_agent_from_the_db_log_alone() {
                 .map(String::from)
         })
         .unwrap_or_else(|| {
-            panic!("resumed page-writer child never showed a pending page_edit call: {resp:#}")
+            panic!(
+                "resumed page-writer child never showed a pending page_edit call: {child_detail:#}"
+            )
         });
     assert_eq!(
         call_id, "edit-1",
-        "the id round-tripped through replay+projection: {resp:#}"
+        "the id round-tripped through replay+projection: {child_detail:#}"
     );
 
     // #99: the same read hydrates the child's own `assistant_sessions` row,

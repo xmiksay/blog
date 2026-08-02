@@ -116,4 +116,35 @@ describe('AssistantMessageContent', () => {
 
     expect(wrapper.text()).toContain('Approve all')
   })
+
+  // #100: a sub-agent contributes a reference card, never a nested
+  // transcript. The old recursive `<details>` rendered nothing at all for a
+  // grandchild; the card has to read on its own, without a click.
+  it('renders a sub-agent as a summary card, not a nested transcript', () => {
+    const wrapper = mount(AssistantMessageContent, {
+      props: {
+        role: 'assistant',
+        content: {
+          text: null,
+          tool_calls: [{ id: 'spawn-1', name: 'agent_spawn', args: {}, resolved: true }],
+          sub_agents: [
+            {
+              agent_id: 'a-uuid',
+              profile: 'researcher',
+              task: 'look into X',
+              message_count: 4,
+              preview: 'X is interesting.',
+              child_db_session_id: 7,
+            },
+          ],
+        },
+        messageId: 0,
+      },
+    })
+
+    expect(wrapper.text()).toContain('researcher')
+    expect(wrapper.text()).toContain('look into X')
+    expect(wrapper.text()).toContain('4 messages')
+    expect(wrapper.text()).toContain('X is interesting.')
+  })
 })
