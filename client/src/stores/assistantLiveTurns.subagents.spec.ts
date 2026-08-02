@@ -132,6 +132,99 @@ describe('useLiveTurns — sub-agent routing', () => {
     expect(loadSession).not.toHaveBeenCalled()
   })
 
+  // ---- child_db_session_id (#102): additive, never a repurposed db_session_id ----
+
+  it('keeps dbSessionId on the parent while recording the child row as childDbSessionId', () => {
+    const { liveSubAgents } = setup()
+    wsHandler!(
+      envelope('session_started', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        profile: 'researcher',
+      }),
+    )
+    wsHandler!(
+      envelope('text_delta', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        text: 'child',
+      }),
+    )
+
+    // `dbSessionId` must stay the parent — `AssistantView.vue` filters the
+    // inline running-sub-agent card on it.
+    expect(liveSubAgents.value['child-1']).toMatchObject({
+      dbSessionId: 1,
+      childDbSessionId: 5,
+      text: 'child',
+    })
+  })
+
+  it('backfills childDbSessionId from a later event when the first one lacked it', () => {
+    const { liveSubAgents } = setup()
+    wsHandler!(envelope('session_started', { db_session_id: 1, agent_session_id: 'child-1' }))
+    expect(liveSubAgents.value['child-1'].childDbSessionId).toBeUndefined()
+
+    wsHandler!(
+      envelope('text_delta', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+        text: 'child',
+      }),
+    )
+    expect(liveSubAgents.value['child-1'].childDbSessionId).toBe(5)
+  })
+
+  it('sub-agent done still refetches the parent when the parent is the open session', () => {
+    current.value = { id: 1 } as AssistantSessionDetail
+    const { liveSubAgents } = setup()
+    wsHandler!(
+      envelope('session_started', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+      }),
+    )
+    wsHandler!(
+      envelope('done', { db_session_id: 1, agent_session_id: 'child-1', child_db_session_id: 5 }),
+    )
+
+    expect(liveSubAgents.value['child-1']).toBeUndefined()
+    expect(loadSession).toHaveBeenCalledTimes(1)
+    expect(loadSession).toHaveBeenCalledWith(1)
+  })
+
+  it('sub-agent done refetches the child when the child itself is the open session', () => {
+    current.value = { id: 5 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('session_started', {
+        db_session_id: 1,
+        agent_session_id: 'child-1',
+        child_db_session_id: 5,
+      }),
+    )
+    wsHandler!(
+      envelope('done', { db_session_id: 1, agent_session_id: 'child-1', child_db_session_id: 5 }),
+    )
+
+    expect(loadSession).toHaveBeenCalledTimes(1)
+    expect(loadSession).toHaveBeenCalledWith(5)
+  })
+
+  it('sub-agent done refetches nobody when neither the parent nor the child is open', () => {
+    current.value = { id: 9 } as AssistantSessionDetail
+    setup()
+    wsHandler!(
+      envelope('done', { db_session_id: 1, agent_session_id: 'child-1', child_db_session_id: 5 }),
+    )
+
+    expect(loadSession).not.toHaveBeenCalled()
+  })
+
   // ---- resolveLiveToolCall: the click-triggered path (#stuck approval fix) ----
 
   it('resolveLiveToolCall marks a root call done without output, simulating the click path', () => {

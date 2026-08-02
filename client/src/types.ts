@@ -210,10 +210,18 @@ export interface AssistantSubAgent {
  * own bucket (keyed by `agentSessionId`, not nested inside `LiveTurn`)
  * because a child keeps running detached after the root's own `live` turn
  * has already settled and cleared.
+ *
+ * `dbSessionId` is the **root's** session row, a child's events included —
+ * that is what `AssistantView.vue` filters the inline running-sub-agent card
+ * on. Since #99 the child has a row of its own too; #102 carries it
+ * additively as `childDbSessionId` (absent when the backend never wrote the
+ * child's row) rather than repurposing `dbSessionId`, which would make the
+ * card vanish from the parent view.
  */
 export interface LiveSubAgentTurn {
   agentSessionId: string
   dbSessionId: number
+  childDbSessionId?: number
   profile: string
   text: string
   reasoning: string

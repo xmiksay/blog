@@ -33,11 +33,12 @@
 //! `assistant_sessions` row of its own (written here, see [`child_rows`]).
 //! `forward` still resolves `db_session_id` off the event's **root** ancestor,
 //! so a child's deltas land in the same WS stream as its parent turn, with
-//! the child's own id spliced in as `agent_session_id` so the client can tell
-//! them apart and nest them. Root-level events get no `agent_session_id` at
-//! all (rather than one equal to their own session), keeping the envelope
-//! shape byte-identical to before #17 for every session that never spawns a
-//! sub-agent.
+//! the child's own engine id spliced in as `agent_session_id` (and, since
+//! #102, its own row id as `child_db_session_id`) so the client can tell them
+//! apart and nest them. Root-level events get neither field (rather than an
+//! `agent_session_id` equal to their own session), keeping the envelope shape
+//! byte-identical to before #17 for every session that never spawns a
+//! sub-agent. See [`envelope`] for why the child's ids are strictly additive.
 //!
 //! Root resolution is **not** simply `engine::root_session_of` — that reads a
 //! process-global cache (`engine.rs`'s `SESSION_PARENTS`) written by a
@@ -55,6 +56,7 @@
 //! subscription (a session already established when the process started).
 
 pub mod child_rows;
+pub mod envelope;
 
 use dashmap::DashMap;
 use entanglement_core::{OutEvent, SessionId};
@@ -193,14 +195,14 @@ async fn forward(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("db_session_id".into(), serde_json::json!(db_session_id));
-        // Only present for a sub-agent's own events — a root event carries no
-        // `agent_session_id`, keeping every pre-#17 consumer's shape intact.
-        if session != &root {
-            obj.insert("agent_session_id".into(), serde_json::json!(session.0));
-        }
-    }
+    let child_db_session_id = envelope::child_db_session_id(session_db_ids, session, &root);
+    envelope::splice_session_ids(
+        &mut payload,
+        db_session_id,
+        session,
+        &root,
+        child_db_session_id,
+    );
 
     hub.publish(
         user_id,

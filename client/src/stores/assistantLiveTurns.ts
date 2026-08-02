@@ -3,7 +3,7 @@ import { useWsStore } from './ws'
 import type { AssistantSessionDetail, LiveSubAgentTurn, LiveToolCall, LiveTurn } from '../types'
 
 // Real, token-level streaming from the entanglement engine (issue #16
-// connecting to #15's `Holly`) — `src/ai/ws_bridge.rs` forwards the
+// connecting to #15's `Holly`) — `src/ai/ws_bridge/` forwards the
 // engine's `OutEvent`s more or less verbatim, tagged with `db_session_id`
 // (the engine only knows its own `SessionId`, not this DB row's id).
 // `text_delta`/`reasoning_delta`/`tool_call*` accumulate into `live` for
@@ -56,6 +56,7 @@ export function useLiveTurns(
   function ensureLiveSubAgent(
     dbSessionId: number,
     agentSessionId: string,
+    childDbSessionId?: number,
     profile?: string,
   ): LiveSubAgentTurn {
     let turn = liveSubAgents.value[agentSessionId]
@@ -63,6 +64,7 @@ export function useLiveTurns(
       turn = {
         agentSessionId,
         dbSessionId,
+        childDbSessionId,
         profile: profile ?? '',
         text: '',
         reasoning: '',
@@ -70,8 +72,13 @@ export function useLiveTurns(
         done: false,
       }
       liveSubAgents.value[agentSessionId] = turn
-    } else if (profile && !turn.profile) {
-      turn.profile = profile
+    } else {
+      if (profile && !turn.profile) turn.profile = profile
+      // Backfill rather than overwrite: the child's row id can be missing from
+      // the first event (backend cache miss, #102) and show up on a later one.
+      if (childDbSessionId !== undefined && turn.childDbSessionId === undefined) {
+        turn.childDbSessionId = childDbSessionId
+      }
     }
     return turn
   }
@@ -79,10 +86,11 @@ export function useLiveTurns(
   function ensureLiveSubAgentToolCall(
     dbSessionId: number,
     agentSessionId: string,
+    childDbSessionId: number | undefined,
     id: string,
     name: string,
   ): LiveToolCall {
-    const turn = ensureLiveSubAgent(dbSessionId, agentSessionId)
+    const turn = ensureLiveSubAgent(dbSessionId, agentSessionId, childDbSessionId)
     let call = turn.toolCalls.find((c) => c.id === id)
     if (!call) {
       call = { id, name, argsText: '', args: undefined, status: 'pending' }
@@ -114,26 +122,32 @@ export function useLiveTurns(
   // A sub-agent's events carry the same envelope kinds as the root's own
   // turn, just tagged with `agent_session_id` instead of belonging to the
   // root — route them into `liveSubAgents` instead of `ensureLive`/`live`.
+  // `dbSessionId` is still the root's row here (see `LiveSubAgentTurn`);
+  // `childDbSessionId` is the child's own row, absent when the backend
+  // couldn't resolve it.
   function handleSubAgentEvent(
     event: string,
     dbSessionId: number,
     agentSessionId: string,
+    childDbSessionId: number | undefined,
     payload: Record<string, any>,
   ) {
     switch (event) {
       case 'session_started':
-        ensureLiveSubAgent(dbSessionId, agentSessionId, payload.profile)
+        ensureLiveSubAgent(dbSessionId, agentSessionId, childDbSessionId, payload.profile)
         break
       case 'text_delta':
-        ensureLiveSubAgent(dbSessionId, agentSessionId).text += payload.text ?? ''
+        ensureLiveSubAgent(dbSessionId, agentSessionId, childDbSessionId).text += payload.text ?? ''
         break
       case 'reasoning_delta':
-        ensureLiveSubAgent(dbSessionId, agentSessionId).reasoning += payload.text ?? ''
+        ensureLiveSubAgent(dbSessionId, agentSessionId, childDbSessionId).reasoning +=
+          payload.text ?? ''
         break
       case 'tool_call_delta': {
         const call = ensureLiveSubAgentToolCall(
           dbSessionId,
           agentSessionId,
+          childDbSessionId,
           payload.request_id,
           payload.tool,
         )
@@ -145,6 +159,7 @@ export function useLiveTurns(
         const call = ensureLiveSubAgentToolCall(
           dbSessionId,
           agentSessionId,
+          childDbSessionId,
           payload.request_id,
           payload.tool,
         )
@@ -162,17 +177,27 @@ export function useLiveTurns(
         break
       case 'done':
       case 'error':
-      case 'session_hibernated':
+      case 'session_hibernated': {
         // Unlike the root's own turn, a finished child is simply dropped —
         // its transcript lives in `sub_agents` on the REST refetch below,
         // there's no separate "settled but still displayed" state for it.
+        // Prefer the id seen on an earlier event of this child: the settle
+        // event can be the one that missed the backend's cache.
+        const childId = liveSubAgents.value[agentSessionId]?.childDbSessionId ?? childDbSessionId
         delete liveSubAgents.value[agentSessionId]
-        if (current.value?.id === dbSessionId) {
-          loadSession(dbSessionId).catch(() => {
+        // Refetch the parent (its transcript gains the finished child's
+        // `sub_agents` block) and, since #99/#102, the child's own session
+        // when that is the one open — it is a real row the user can select,
+        // and nothing else would fill in its transcript. The two ids are
+        // always distinct rows, so at most one branch matches.
+        const openId = current.value?.id
+        if (openId !== undefined && (openId === dbSessionId || openId === childId)) {
+          loadSession(openId).catch(() => {
             // best-effort — see the matching comment on the root-turn branch
           })
         }
         break
+      }
     }
   }
 
@@ -183,7 +208,8 @@ export function useLiveTurns(
 
     const agentSessionId = payload.agent_session_id as string | undefined
     if (agentSessionId) {
-      handleSubAgentEvent(envelope.event, sessionId, agentSessionId, payload)
+      const childDbSessionId = payload.child_db_session_id as number | undefined
+      handleSubAgentEvent(envelope.event, sessionId, agentSessionId, childDbSessionId, payload)
       return
     }
 
