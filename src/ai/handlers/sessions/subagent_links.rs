@@ -61,11 +61,20 @@ pub async fn hydrate_child_rows(
 
 /// Re-point a child row at the profile it was actually spawned under.
 ///
-/// Needed because the two writers can disagree: `ws_bridge`'s live writer
-/// takes the profile off whichever `SessionStarted` it happens to see, and on
-/// a resume that is the replay's degraded `build` (above), while the log this
-/// walks still carries the original. Whichever writer wins the
-/// `ON CONFLICT DO NOTHING` insert, the row ends up correct before the
+/// Entanglement 0.6's `SessionStarted` and the `AgentChanged` that follows it
+/// always name the same profile: `Session::replay` folds every logged
+/// `AgentChanged` before a resumed session re-announces itself, so a normal
+/// resume cascade re-announces the *correct* profile, never `build` (verified
+/// against 0.6.0 — see `child_session_starts`). The two writers can still
+/// disagree in one narrower case: if this child's own persisted log lost its
+/// `AgentChanged` record (a genuine gap — a lagged/crashed persistence tap,
+/// filed upstream separately), replay has nothing to fold and rebuilds the
+/// session under the base `build` profile, so its resume re-announces that
+/// instead of the truth. `ws_bridge`'s live writer takes the profile straight
+/// off whichever `SessionStarted` broadcast it happens to see and could win
+/// the insert with that wrong value, while the log this walks still carries
+/// the original (correct) announcement from before the gap. Whichever writer
+/// wins the `ON CONFLICT DO NOTHING` insert, this repairs the row before the
 /// response that reads it is built.
 ///
 /// A conditional `UPDATE` rather than a read-modify-write `ActiveModel`: it is
@@ -127,9 +136,15 @@ pub fn splice_child_db_ids(projected: &mut [ProjectedMessage], ids: &HashMap<Ses
 /// the tree structure the log records.
 ///
 /// First announcement wins: a resume re-announces `SessionStarted` for every
-/// re-materialized child, and 0.6's replay rebuilds a session under the base
-/// `build` profile (`session/replay.rs` only switches profile on a later
-/// `AgentChanged`), so the *later* record names the wrong agent — see
+/// re-materialized child, and in the ordinary case that re-announcement names
+/// the same profile the child was actually spawned under — 0.6's replay folds
+/// every logged `AgentChanged` before a resumed session re-announces itself,
+/// so `SessionStarted.profile` and the following `AgentChanged.agent` never
+/// disagree. The one case where a *later* record can name the wrong agent is
+/// a genuine gap in this child's own log: it lost its `AgentChanged` record,
+/// so replay has nothing to fold and rebuilds it under the base `build`
+/// profile instead (filed upstream separately). Keeping the first
+/// announcement recovers the true profile from before that gap — see
 /// [`repair_profile`].
 fn child_session_starts(records: &[LogRecord]) -> Vec<(&SessionId, &SessionId, &str)> {
     let mut seen = HashSet::new();
@@ -213,10 +228,11 @@ mod tests {
         );
     }
 
-    /// A resume re-announces every re-materialized child, and 0.6's replay
-    /// rebuilds it under the base `build` profile — so the second
-    /// announcement names the wrong agent and must not be what a row is
-    /// written (or repaired) from.
+    /// A gap in a child's own persisted log — it lost its `AgentChanged`
+    /// record, a rare upstream persistence hole, not the ordinary resume path
+    /// — makes a later re-announcement of that child name the base `build`
+    /// profile instead of the truth. The first announcement, from before the
+    /// gap, must be what a row is written (or repaired) from.
     #[test]
     fn keeps_only_a_childs_first_announcement() {
         let root = SessionId::new("u1:root".to_string());
@@ -224,7 +240,7 @@ mod tests {
         let records = vec![
             started(&root, None, "build"),
             started(&child, Some(&root), "page-writer"),
-            // The resume cascade's re-announcement.
+            // A resume re-announcement degraded by a lost `AgentChanged`.
             started(&child, Some(&root), "build"),
         ];
 

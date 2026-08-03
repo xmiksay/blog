@@ -192,6 +192,13 @@ pub async fn approve(
 ///    cascade), stop: `Holly::resume` refuses a live id.
 /// 3. Otherwise rebuild it from its own slice of the root's log
 ///    (`persistence::resume_child_session`).
+///
+/// No branch falls through to a bare `InMsg::Prompt` on `target` without one
+/// of these three having run first, so a sub-agent turn can never hit
+/// entanglement's lazy-`Prompt` path (`holly.rs`'s unknown-session fallback,
+/// which materializes a blank session under the default `build` profile) —
+/// that path is a genuine hole this handler must not open, not the resume
+/// cascade itself (see `subagent_links::repair_profile`).
 async fn ensure_target_live(
     state: &AppState,
     root: &SessionId,
