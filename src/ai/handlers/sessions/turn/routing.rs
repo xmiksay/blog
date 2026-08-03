@@ -48,6 +48,55 @@ pub(super) fn open_tool_requests(prior: &[LogRecord]) -> Vec<(SessionId, String)
         .collect()
 }
 
+/// [`open_tool_requests`], but re-read against a fresh `assistant_events` load
+/// until the *other* (see `own_call_ids` below) open entries stop changing —
+/// closes the same `DbSink` TOCTOU window [`session_for_call_awaiting`]
+/// already closes for its own lookup (#104): `prior` is a snapshot that can be
+/// missing a `ToolOutput` the async writer hasn't flushed yet, so a call
+/// resolved moments ago by an earlier, already-answered request can still read
+/// as open here. Trusting that stale entry as a genuine "something else is
+/// still open" readiness signal makes [`send_and_collect`](super::collect::
+/// send_and_collect) refuse to graduate the session into `session_targets`,
+/// so it returns the instant *this* request's own decisions settle — before
+/// the model's closing reply, which is still coming.
+///
+/// `own_call_ids` — this same request's own `decisions` — are excluded before
+/// checking for staleness: they are *expected* to read as open (this very
+/// request is what resolves them, and hasn't sent anything to the engine
+/// yet), so retrying on their account would add a DB round trip to every
+/// ordinary approve for no reason. Only when some *other* call still reads
+/// open — the actual shape of this race — do we pay for a bounded re-read,
+/// stopping as soon as two consecutive reads agree (the writer has caught up)
+/// or [`CALL_LOOKUP_RETRY_ATTEMPTS`] is exhausted, whichever comes first.
+pub(super) async fn open_tool_requests_settled(
+    db: &sea_orm::DatabaseConnection,
+    session_id: &SessionId,
+    prior: &[LogRecord],
+    own_call_ids: &std::collections::HashSet<&str>,
+) -> ApiResult<Vec<(SessionId, String)>> {
+    let others =
+        |pending: Vec<(SessionId, String)>| -> std::collections::HashSet<(SessionId, String)> {
+            pending
+                .into_iter()
+                .filter(|(_, id)| !own_call_ids.contains(id.as_str()))
+                .collect()
+        };
+    let mut current = others(open_tool_requests(prior));
+    if current.is_empty() {
+        return Ok(Vec::new());
+    }
+    for _ in 0..CALL_LOOKUP_RETRY_ATTEMPTS {
+        tokio::time::sleep(CALL_LOOKUP_RETRY_DELAY).await;
+        let reloaded = load_prior_records(db, session_id).await?;
+        let next = others(open_tool_requests(&reloaded));
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    Ok(current.into_iter().collect())
+}
+
 /// Persist an "always deny" `tool_permissions` rule for the tool behind
 /// `call_id`, resolved by scanning `prior` for the `ToolCall`/`ToolRequest`
 /// record that named it. Mirrors the old approve-handler's direct insert;
