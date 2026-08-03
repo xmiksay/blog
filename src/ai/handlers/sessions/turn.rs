@@ -35,7 +35,7 @@ use axum::Json;
 use axum::extract::{Extension, Path, State};
 use entanglement_core::{ApprovalScope, InMsg, SessionId};
 use entanglement_runtime::session_store::LogRecord;
-use routing::{open_tool_requests, remember_deny};
+use routing::{open_tool_requests_settled, remember_deny};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use super::tree::root_engine_id;
@@ -170,7 +170,16 @@ pub async fn approve(
         }
     }
 
-    let extra_pending = open_tool_requests(&prior);
+    // #104: a plain `open_tool_requests(&prior)` trusts `prior` at face value,
+    // but `prior` can be missing a `ToolOutput` `DbSink`'s async writer hasn't
+    // flushed yet for a call this same handler already resolved on a *prior*
+    // request — see `open_tool_requests_settled`'s doc.
+    let own_call_ids: std::collections::HashSet<&str> = body
+        .decisions
+        .iter()
+        .map(|d| d.tool_call_id.as_str())
+        .collect();
+    let extra_pending = open_tool_requests_settled(&state.db, &root, &prior, &own_call_ids).await?;
     let collected = collect::send_and_collect(engine, &target, msgs, extra_pending).await?;
     build_detail(&state, id, &target, prior, collected).await
 }
