@@ -47,13 +47,13 @@ async fn handle(
             .into_response();
     };
 
-    if format.requires_pandoc() && !state.pandoc_available {
+    let Some(client) = &state.mdcast else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "pandoc is not installed on this server; reveal.js-slides export is unavailable",
+            "export render server is not configured; export is unavailable",
         )
             .into_response();
-    }
+    };
 
     let path = path_util::normalize(req.uri().path());
     let logged_in = auth::is_logged_in(&state, &jar).await.is_some();
@@ -67,6 +67,7 @@ async fn handle(
 
     let env = state.tmpl.env();
     let artifact = match export::render_page(
+        client,
         &state.db,
         &state.design,
         &env,
@@ -78,8 +79,16 @@ async fn handle(
     .await
     {
         Ok(a) => a,
+        Err(export::ExportError::Unavailable(msg)) => {
+            tracing::warn!("export render server unavailable for `{path}`: {msg}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "export render server is unavailable; try again later",
+            )
+                .into_response();
+        }
         Err(e) => {
-            tracing::error!("export render failed for `{path}`: {e:#}");
+            tracing::error!("export render failed for `{path}`: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "export failed").into_response();
         }
     };
@@ -97,7 +106,7 @@ async fn handle(
                 format!("attachment; filename=\"{filename}\""),
             ),
         ],
-        artifact.primary.to_vec(),
+        artifact.bytes.to_vec(),
     )
         .into_response()
 }

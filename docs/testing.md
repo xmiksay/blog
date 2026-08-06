@@ -159,12 +159,17 @@ executes on every PR rather than self-skipping.
   `OpenAiLlm`) rather than a scripted `Llm`: it keeps the real wire format in
   the loop with no network and no pulled model. `tests/assistant_session_
   compact.rs` is its second consumer, which is why it lives in `common/`.
-- `tests/export_assets.rs`, `tests/export_bridge.rs`, `tests/export_routes.rs`
-  — the mdcast export subsystem (#63–#68): `DbAssetProvider`'s
-  content-addressed `file_blobs` resolution, the `render_for_export`
-  directive→plain-markdown bridge (image refs, pipe tables, spliced pages,
-  synthesized fen/pgn/mermaid diagrams), and both export routes (public
-  `/{*path}?format=pdf|slides` and admin `/api/export/pages/{id}`).
+- `tests/export_bundle.rs`, `tests/export_bridge.rs`, `tests/export_routes.rs`
+  — the mdcast export subsystem (#63–#68, remote since mdcast 0.4):
+  `build_bundle`'s digest-only declaration of `files.hash` against real
+  `file_blobs` rows, the `render_for_export` directive→plain-markdown bridge
+  (image refs, pipe tables, spliced pages, synthesized fen/pgn/mermaid
+  diagrams), and both export routes (public `/{*path}?format=pdf|slides` and
+  admin `/api/export/pages/{id}`) against `tests/common/mdcast_mock.rs` — a
+  minimal in-process `mdcast-server` stand-in (canned artifact bytes, plus a
+  negotiation mode whose first render `409`s so the client's blob-upload
+  retry and the lazy `file_blobs` fetch run for real; same `#[path]`-included
+  pattern as `llm_mock.rs`).
 - `tests/assistant_providers_status.rs` — `GET /api/assistant/providers/status`
   (#89): DB-gated only; the idle throttle-status path never makes a real
   provider HTTP request.

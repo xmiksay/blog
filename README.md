@@ -75,6 +75,8 @@ docker compose exec app ./site_migration
 | `PORT` | HTTP listen port | `3000` |
 | `DESIGN_DIR` | Override folder for `{templates, assets/{css,js,img}}`, checked before the baked `design/` bundle (debug: live reload; release: frozen into RAM at startup) | unset |
 | `SERPER_API_KEY` | Optional — enables the `web_search` tool inside the AI assistant | unset |
+| `MDCAST_URL` | Base URL of the remote [`mdcast-server`](https://github.com/xmiksay/mdcast) that renders PDF/slides exports — export routes answer 503 while unset | unset |
+| `MDCAST_TOKEN` | Bearer token for `mdcast-server` (unset sends a placeholder, fine for a tokenless server) | unset |
 | `PUBLIC_URL` | Public base URL for absolute `<loc>` entries in `/sitemap.xml` | unset (falls back to `SELF_URL`, then `http://localhost:3000`) |
 | `SELF_URL` | Fallback base URL for the sitemap when `PUBLIC_URL` is unset | unset |
 

@@ -39,7 +39,8 @@ async fn setup(db_url: &str, tag: &str) -> Fixture {
         database_url: db_url.to_string(),
         design_dir: None,
         serper_api_key: None,
-        mdcast_pandoc_path: "pandoc".to_string(),
+        mdcast_url: None,
+        mdcast_token: None,
     };
     let state: AppState = state::create_state(&config).await;
     let db = state.db.clone();

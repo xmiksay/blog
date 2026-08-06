@@ -1,69 +1,90 @@
-//! Export capability checks (#64 — foundation for the mdcast integration,
-//! #63). `mdcast` renders PDF/PDF-slides (`Target::Pdf`/`PdfPresentation`)
-//! in-process via the `typst`/`typst-as-lib` crates — no external `typst`
-//! binary is ever spawned, so there is nothing to probe for it. DOCX/ODT/
-//! PPTX/reveal.js-slides (`Target::HtmlReveal`, the epic's slice-1 slide
-//! format) shell out to a `pandoc` subprocess, which *is* an external
-//! runtime dependency and can be absent. `probe_pandoc` is the cheap
-//! startup check that turns a missing binary into a typed, loggable error
-//! instead of a panic the first time an export route tries to spawn it. The
-//! public `/{*path}?format=...` and admin `/api/export/pages/{id}` routes
-//! (#67) render through it. `assets` (#65) provides the DB-backed
-//! `mdcast::AssetProvider` those routes render through. `bridge` (#66)
-//! layers `markdown::render_for_export`'s synthesized fen/pgn/mermaid SVGs
-//! over that provider. `render` (#67) is the actual render entrypoint the
-//! routes call.
+//! Page export via a remote `mdcast-server` (#64–#68 grew the in-process
+//! integration; mdcast 0.4 replaced it with a thin HTTP client). The site no
+//! longer compiles typst or spawns pandoc: `render` bridges the site's
+//! markdown directives to plain markdown + synthesized diagram SVGs, `bundle`
+//! declares every referenced asset by sha256 digest (bytes upload only when
+//! the server's content-addressed cache misses), and `mdcast-client` handles
+//! the `409 → upload → retry` negotiation. Splitting/classification and the
+//! actual PDF/reveal.js rendering happen server-side, driven by the
+//! `BrandSpec` sent with each request.
+//!
+//! `MDCAST_URL` unset → `AppState.mdcast` is `None` and both export routes
+//! answer 503; nothing else in the site degrades.
 
-mod assets;
-mod bridge;
+mod bundle;
 mod render;
 
 use std::fmt;
+use std::time::Duration;
 
-use tokio::process::Command;
+use anyhow::Context;
 
 pub use crate::markdown::BridgedMarkdown;
-pub use assets::DbAssetProvider;
-pub use bridge::asset_provider;
+pub use bundle::build_bundle;
 pub use render::{ExportFormat, render_page};
 
-/// The configured pandoc binary could not be spawned or reported a failing
-/// exit status. Never constructed from a panic — every path that can fail
-/// (missing binary, spawn error, non-zero exit) is funneled through here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PandocUnavailable {
-    pub binary: String,
-    pub reason: String,
+/// Why an export render failed, split by the HTTP status the routes owe the
+/// caller. Never constructed from a panic — every failure path (transport,
+/// server error, bad bundle) funnels through here.
+#[derive(Debug)]
+pub enum ExportError {
+    /// The render server is unreachable or answering as a bad gateway —
+    /// routes answer 503, the caller should retry later.
+    Unavailable(String),
+    /// Anything else (render failure, bad request, auth, digest mismatch) —
+    /// routes answer 500 and log the full chain.
+    Failed(anyhow::Error),
 }
 
-impl fmt::Display for PandocUnavailable {
+impl fmt::Display for ExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "pandoc binary `{}` unavailable: {}",
-            self.binary, self.reason
-        )
+        match self {
+            Self::Unavailable(msg) => write!(f, "export render server unavailable: {msg}"),
+            Self::Failed(err) => write!(f, "{err:#}"),
+        }
     }
 }
 
-impl std::error::Error for PandocUnavailable {}
-
-/// Confirm `binary` (`pandoc` unless overridden by `MDCAST_PANDOC_PATH`) is
-/// on PATH and runnable. Cheap enough to call once at startup; callers must
-/// not treat a failure as fatal — the rest of the site works fine without
-/// export, so this degrades to a warning + typed error, never a panic/unwrap.
-pub async fn probe_pandoc(binary: &str) -> Result<(), PandocUnavailable> {
-    match Command::new(binary).arg("--version").output().await {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(PandocUnavailable {
-            binary: binary.to_string(),
-            reason: format!("exited with status {}", output.status),
-        }),
-        Err(err) => Err(PandocUnavailable {
-            binary: binary.to_string(),
-            reason: err.to_string(),
-        }),
+impl From<mdcast_client::Error> for ExportError {
+    fn from(err: mdcast_client::Error) -> Self {
+        use mdcast_client::Error as E;
+        let unavailable = matches!(
+            &err,
+            E::Transport(_)
+                | E::Server {
+                    status: 502..=504,
+                    ..
+                }
+        );
+        if unavailable {
+            Self::Unavailable(err.to_string())
+        } else {
+            Self::Failed(err.into())
+        }
     }
+}
+
+impl From<anyhow::Error> for ExportError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Failed(err)
+    }
+}
+
+/// Construct the process-wide mdcast client. `mdcast-client` refuses an
+/// empty token while a tokenless server ignores the bearer value, so an
+/// unset `MDCAST_TOKEN` becomes a literal placeholder. The injected reqwest
+/// client is the only place timeouts can be set — the builder has no knob.
+pub fn build_client(url: &str, token: Option<&str>) -> anyhow::Result<mdcast_client::Client> {
+    let http = reqwest12::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .context("building the HTTP client for mdcast-server")?;
+    mdcast_client::Client::builder(url)
+        .token(token.unwrap_or("unauthenticated"))
+        .http_client(http)
+        .build()
+        .with_context(|| format!("configuring the mdcast client for `{url}`"))
 }
 
 /// Header-safe filename component shared by the public and admin export
@@ -93,17 +114,37 @@ mod tests {
         assert_eq!(sanitize_filename("héllo\r\n\""), "h-llo---");
     }
 
-    #[tokio::test]
-    async fn probe_pandoc_reports_missing_binary_without_panicking() {
-        let err = probe_pandoc("mdcast-nonexistent-binary-xyz")
-            .await
-            .expect_err("a nonexistent binary must never be reported available");
-        assert!(err.to_string().contains("mdcast-nonexistent-binary-xyz"));
+    #[test]
+    fn build_client_accepts_a_tokenless_config_via_the_placeholder() {
+        build_client("http://127.0.0.1:9", None)
+            .expect("a placeholder token must satisfy the client's non-empty check");
     }
 
     #[test]
-    fn mdcast_is_linked_with_the_configured_features() {
-        assert_eq!(mdcast::Target::Pdf.extension(), "pdf");
-        assert_eq!(mdcast::Target::HtmlReveal.extension(), "html");
+    fn build_client_rejects_a_non_http_url() {
+        assert!(build_client("ftp://example.com", None).is_err());
+    }
+
+    #[test]
+    fn transport_and_gateway_errors_map_to_unavailable() {
+        let gateway = mdcast_client::Error::Server {
+            status: 503,
+            code: mdcast_client::mdcast_api::wire::ErrorCode::Internal,
+            message: "down".into(),
+        };
+        assert!(matches!(
+            ExportError::from(gateway),
+            ExportError::Unavailable(_)
+        ));
+
+        let render_failed = mdcast_client::Error::Server {
+            status: 500,
+            code: mdcast_client::mdcast_api::wire::ErrorCode::RenderFailed,
+            message: "typst error".into(),
+        };
+        assert!(matches!(
+            ExportError::from(render_failed),
+            ExportError::Failed(_)
+        ));
     }
 }

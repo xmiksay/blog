@@ -7,7 +7,6 @@ COPY client/ ./
 RUN npm run build
 
 # -- Backend build --
-# mdcast pulls in typst 0.14, whose crates require rustc >= 1.89 (#64).
 FROM rust:1.97-bookworm AS backend
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -18,11 +17,10 @@ RUN cargo build --release --bin site_server --bin site_cli --bin site_migration
 
 # -- Runtime --
 FROM debian:bookworm-slim
-# pandoc: mdcast's DOCX/ODT/PPTX/reveal.js-slides export backends shell out to
-# it as a subprocess (#64). No `typst` package here — PDF/PDF-slides export
-# renders in-process via the `typst`/`typst-as-lib` Rust crates, so there is
-# no separate `typst` binary to provision.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates pandoc && rm -rf /var/lib/apt/lists/*
+# No pandoc/typst here: since mdcast 0.4 PDF/slides export happens on a
+# separate `mdcast-server` deployment reached via MDCAST_URL. ca-certificates
+# stays for TLS (to that server, among others).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend /app/target/release/site_server ./
 COPY --from=backend /app/target/release/site_cli ./

@@ -3,9 +3,10 @@
 //! subsuming `catch_all`'s fallback for every non-root path) and the admin
 //! `/api/export/pages/{id}?format=pdf|slides` route
 //! (`src/routes/api/export.rs`). Exercises the real `export::render_page`
-//! pipeline end to end — directive bridge (#66) -> mdcast split/classify ->
-//! `Registry::render_to_bytes` against the `EmbeddedAssets`-fallback
-//! provider (#67) — so a real render, not a stub.
+//! pipeline end to end — directive bridge (#66) -> `build_bundle` ->
+//! `mdcast-client`'s render + blob negotiation — against the in-process
+//! `common/mdcast_mock.rs` server, which returns canned artifact bytes
+//! (rendering itself is `mdcast-server`'s job, not this repo's).
 //!
 //! Gated on `DATABASE_URL` per this repo's convention (see
 //! `tests/api_pages.rs`'s module doc): skipped with a message, not a
@@ -18,6 +19,8 @@
 // convention as `tests/oauth_authorize.rs`.
 #[allow(dead_code)]
 mod common;
+#[path = "common/mdcast_mock.rs"]
+mod mdcast_mock;
 
 use axum::Router;
 use axum::body::Body;
@@ -37,14 +40,21 @@ struct Fixture {
     db: DatabaseConnection,
     cookie: String,
     user_id: i32,
+    mock: mdcast_mock::MdcastMock,
 }
 
 async fn setup(db_url: &str, tag: &str) -> Fixture {
+    setup_with(db_url, tag, false).await
+}
+
+async fn setup_with(db_url: &str, tag: &str, negotiate: bool) -> Fixture {
+    let mock = mdcast_mock::spawn_mdcast_mock(negotiate).await;
     let config = Config {
         database_url: db_url.to_string(),
         design_dir: None,
         serper_api_key: None,
-        mdcast_pandoc_path: "pandoc".to_string(),
+        mdcast_url: Some(mock.base_url.clone()),
+        mdcast_token: None,
     };
     let state: AppState = state::create_state(&config).await;
     let db = state.db.clone();
@@ -77,6 +87,7 @@ async fn setup(db_url: &str, tag: &str) -> Fixture {
         db,
         cookie: format!("{SESSION_COOKIE}={nonce}"),
         user_id: saved_user.id,
+        mock,
     }
 }
 
@@ -190,7 +201,7 @@ async fn public_pdf_export_returns_a_real_pdf() {
 }
 
 #[tokio::test]
-async fn public_slides_export_succeeds_when_pandoc_available_and_503s_when_not() {
+async fn public_slides_export_succeeds_and_503s_when_unconfigured() {
     let Some(db_url) = test_db_url().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -206,30 +217,26 @@ async fn public_slides_export_succeeds_when_pandoc_available_and_503s_when_not()
     )
     .await;
 
-    if fx.state.pandoc_available {
-        let app = public_app(&fx.state);
-        let (status, headers, body) = raw_get(&app, &format!("/{path}?format=slides"), None).await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "body: {}",
-            String::from_utf8_lossy(&body)
-        );
-        assert_eq!(
-            headers.get("content-type").unwrap(),
-            "text/html; charset=utf-8"
-        );
-        assert!(!body.is_empty());
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("<html"), "got: {text}");
-    } else {
-        eprintln!("pandoc unavailable in this environment; skipping the 200 branch");
-    }
+    let app = public_app(&fx.state);
+    let (status, headers, body) = raw_get(&app, &format!("/{path}?format=slides"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        headers.get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert!(!body.is_empty());
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("<html"), "got: {text}");
 
-    // Deterministic 503 path regardless of whether pandoc happens to be
-    // installed in this environment: force `pandoc_available` off.
+    // Deterministic 503 path: an AppState with no render server configured
+    // (`MDCAST_URL` unset) refuses every export format up front.
     let mut state2 = fx.state.clone();
-    state2.pandoc_available = false;
+    state2.mdcast = None;
     let app2 = public_app(&state2);
     let (status, _headers, body) = raw_get(&app2, &format!("/{path}?format=slides"), None).await;
     assert_eq!(
@@ -240,6 +247,80 @@ async fn public_slides_export_succeeds_when_pandoc_available_and_503s_when_not()
     );
 
     delete_page(&fx.db, pg.id).await;
+    cleanup_user(&fx.db, fx.user_id).await;
+}
+
+/// The one test that runs the client's full cold-cache negotiation: the
+/// page references a stored image, `build_bundle` declares it digest-only,
+/// the mock's first render answers `409` naming that digest, and the lazy
+/// fetch closure must pull the bytes out of `file_blobs` for the upload
+/// before the retry succeeds.
+#[tokio::test]
+async fn cold_cache_negotiation_uploads_the_missing_blob_and_retries() {
+    let Some(db_url) = test_db_url().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let fx = setup_with(&db_url, "negotiate", true).await;
+
+    let image_path = format!("export-routes-test/img-{}.png", uuid::Uuid::new_v4());
+    let image_bytes: &[u8] = b"\x89PNG fake image bytes for negotiation";
+    let hash = site::files::hash_blob(image_bytes);
+    site::files::put_blob(&fx.db, &hash, image_bytes)
+        .await
+        .expect("insert blob");
+    let now = chrono::Utc::now().fixed_offset();
+    let file_row = site::entity::file::ActiveModel {
+        hash: Set(hash.clone()),
+        mimetype: Set("image/png".to_string()),
+        path: Set(image_path.clone()),
+        description: Set(None),
+        size_bytes: Set(image_bytes.len() as i64),
+        created_at: Set(now),
+        created_by: Set(fx.user_id),
+        ..Default::default()
+    }
+    .insert(&fx.db)
+    .await
+    .expect("insert file row");
+
+    let path = format!("export-routes-test/negotiate-{}", uuid::Uuid::new_v4());
+    let pg = insert_page(
+        &fx.db,
+        &path,
+        &format!("# With image\n\n![img]({image_path})"),
+        false,
+        fx.user_id,
+    )
+    .await;
+
+    let app = public_app(&fx.state);
+    let (status, _headers, body) = raw_get(&app, &format!("/{path}?format=pdf"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(body.starts_with(b"%PDF"));
+
+    use std::sync::atomic::Ordering;
+    assert_eq!(
+        fx.mock.render_calls.load(Ordering::SeqCst),
+        2,
+        "expected 409 -> upload -> retry, i.e. exactly two render POSTs"
+    );
+    assert_eq!(
+        fx.mock.blob_uploads.load(Ordering::SeqCst),
+        1,
+        "the missing blob must be uploaded exactly once"
+    );
+
+    delete_page(&fx.db, pg.id).await;
+    site::entity::file::Entity::delete_by_id(file_row.id)
+        .exec(&fx.db)
+        .await
+        .expect("delete throwaway file");
     cleanup_user(&fx.db, fx.user_id).await;
 }
 
