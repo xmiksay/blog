@@ -1,34 +1,27 @@
-//! The mdcast render entrypoint (#67, wiring together #64's `probe_pandoc`,
-//! #65's `DbAssetProvider`, and #66's directive bridge into an actual
-//! bytes-first render).
+//! The export render entrypoint: bridge the site's markdown directives to
+//! plain markdown + synthesized SVGs (#66), assemble the asset bundle, and
+//! post the render to the remote `mdcast-server` through `mdcast-client`.
 //!
-//! mdcast ships its own embedded typst layouts / reveal.js dist
-//! (`mdcast::EmbeddedAssets`); `render_page` layers `EmbeddedAssets` in as the
-//! base so every export works out of the box even where `design/mdcast/`
-//! (baked or `DESIGN_DIR`-overridden) has nothing to say, and `DbAssetProvider`
-//! sits `over` it so the site's own overrides win per key. `design/mdcast/`
-//! (#68) mirrors that catalog for the classes/keys this site's brand actually
-//! themes: `brand.toml` (the `BrandSpec` loaded below), the brand-aware
-//! `typst/layouts/pdf/{content,hero,callout,section-divider,thanks}.typ`
-//! (`image-full.typ` has no themeable text/color, so it falls through to
-//! mdcast's embedded default untouched), and a `revealjs/brand.css` escape
-//! hatch layered onto mdcast's own palette/font → reveal.js CSS projection.
-//! The #66 bridge (`export::asset_provider`) layers on top of all of that so
-//! synthesized fen/pgn/mermaid SVGs always win.
+//! The server runs the whole mdcast pipeline — frontmatter extraction, page
+//! splitting, auto-classification against `BrandSpec::auto_layout`, and the
+//! typst/pandoc backends — so the site sends raw multi-page markdown plus the
+//! brand it loaded from `design/mdcast/brand.toml` (#68) and never splits or
+//! classifies locally. Template overrides in the bundle shadow the server's
+//! embedded catalog per mdcast 0.4's manifest semantics.
+//!
+//! One behavior delta vs. the in-process pipeline: the server extracts a
+//! leading YAML frontmatter block, and its `title` beats the request's
+//! `meta.title` (the page title passed here).
 
 use std::sync::Arc;
 
-use mdcast::backends::Registry;
-use mdcast::pages::auto::classify;
-use mdcast::{
-    BrandHandle, BrandSpec, DefaultSplitter, DocMeta, EmbeddedAssets, LayeredAssets, PageSplitter,
-    RenderedArtifact, ResolvedDoc, Target,
-};
+use mdcast_client::mdcast_api::{BrandSpec, Target};
+use mdcast_client::{Artifact, Client, request};
 use minijinja::Environment;
 use sea_orm::DatabaseConnection;
 
 use crate::design::DesignStore;
-use crate::export::{DbAssetProvider, asset_provider};
+use crate::export::{ExportError, build_bundle};
 use crate::markdown;
 
 /// The two export shapes this site exposes over HTTP. `mdcast` supports
@@ -62,19 +55,15 @@ impl ExportFormat {
             Self::Slides => "text/html; charset=utf-8",
         }
     }
-
-    /// `Target::HtmlReveal` shells out to `pandoc`; `Target::Pdf` compiles
-    /// in-process via typst and never needs the binary.
-    pub fn requires_pandoc(self) -> bool {
-        matches!(self, Self::Slides)
-    }
 }
 
 /// Render `markdown_src` (a page/menu-item body) to the requested export
-/// format: bridges directives to plain markdown + synthesized diagram assets
-/// (#66), splits/classifies into mdcast pages, and dispatches through
-/// mdcast's bytes-first `Registry` — no temp file ever touches disk.
+/// format on the remote render server: bridge directives to plain markdown +
+/// synthesized diagram assets (#66), declare every referenced asset by
+/// digest, and let `mdcast-client` negotiate which bytes actually upload.
+#[allow(clippy::too_many_arguments)]
 pub async fn render_page(
+    client: &Client,
     db: &DatabaseConnection,
     design: &Arc<DesignStore>,
     tmpl: &Environment<'static>,
@@ -82,45 +71,26 @@ pub async fn render_page(
     title: Option<String>,
     logged_in: bool,
     format: ExportFormat,
-) -> anyhow::Result<RenderedArtifact> {
+) -> Result<Artifact, ExportError> {
     let bridged = markdown::render_for_export(markdown_src, db, tmpl, logged_in).await;
 
     let brand = load_brand(design);
-    let raw = DefaultSplitter.split(&bridged.markdown);
-    let pages = classify(raw, &brand.auto_layout);
+    let bundle = build_bundle(db, design, &brand, &bridged).await?;
 
-    let doc = ResolvedDoc {
-        pages,
-        meta: DocMeta {
-            title,
-            ..Default::default()
-        },
-        brand: BrandHandle(Arc::new(brand)),
-        assets: Vec::new(),
-        fonts: Vec::new(),
-        toc: None,
-    };
+    let mut req = request::markdown(bridged.markdown, format.target());
+    req.meta.title = title;
+    req.brand = Some(brand);
 
-    let db_assets = DbAssetProvider::new(db.clone(), design.clone());
-    let with_fallback = LayeredAssets {
-        over: db_assets,
-        base: EmbeddedAssets,
-    };
-    let assets = asset_provider(&bridged, with_fallback);
-
-    Registry::with_defaults()
-        .render_to_bytes(format.target(), &doc, &assets)
-        .await
+    client.render(req, &bundle).await.map_err(Into::into)
 }
 
 /// Load the site's `BrandSpec` (#68) from `design/mdcast/brand.toml` —
 /// resolved through `DesignStore::load`, so a `DESIGN_DIR` override applies
-/// to it exactly like it does to templates. Unlike mdcast's own catalog keys
-/// (`typst/…`, `revealjs/…`), this isn't fetched through the `AssetProvider`:
-/// `BrandSpec` is caller-owned config handed to `ResolvedDoc` up front, not
-/// something a backend requests mid-render. A missing, non-UTF-8, or
-/// malformed file logs a warning and degrades to `BrandSpec::default()`
-/// rather than failing the export.
+/// to it exactly like it does to templates. Unlike the template overrides
+/// (`typst/…`, `revealjs/…`), this isn't an asset: it travels as
+/// `request.brand`, caller-owned config the server hands to its splitter and
+/// backends. A missing, non-UTF-8, or malformed file logs a warning and
+/// degrades to `BrandSpec::default()` rather than failing the export.
 fn load_brand(design: &DesignStore) -> BrandSpec {
     let Some(bytes) = design.load("mdcast/brand.toml") else {
         return BrandSpec::default();
@@ -159,12 +129,6 @@ mod tests {
             ExportFormat::Slides.content_type(),
             "text/html; charset=utf-8"
         );
-    }
-
-    #[test]
-    fn only_slides_requires_pandoc() {
-        assert!(!ExportFormat::Pdf.requires_pandoc());
-        assert!(ExportFormat::Slides.requires_pandoc());
     }
 
     #[test]

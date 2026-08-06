@@ -32,11 +32,11 @@ async fn export_page(
     let format = ExportFormat::parse(&q.format)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown export format `{}`", q.format)))?;
 
-    if format.requires_pandoc() && !state.pandoc_available {
+    let Some(client) = &state.mdcast else {
         return Err(ApiError::ServiceUnavailable(
-            "pandoc is not installed on this server; reveal.js-slides export is unavailable".into(),
+            "export render server is not configured; export is unavailable".into(),
         ));
-    }
+    };
 
     let pg = page::Entity::find_by_id(id)
         .one(&state.db)
@@ -45,6 +45,7 @@ async fn export_page(
 
     let env = state.tmpl.env();
     let artifact = export::render_page(
+        client,
         &state.db,
         &state.design,
         &env,
@@ -54,9 +55,17 @@ async fn export_page(
         format,
     )
     .await
-    .map_err(|e| {
-        tracing::error!("export render failed for page {id}: {e:#}");
-        ApiError::Internal("export failed".to_string())
+    .map_err(|e| match e {
+        export::ExportError::Unavailable(msg) => {
+            tracing::warn!("export render server unavailable for page {id}: {msg}");
+            ApiError::ServiceUnavailable(
+                "export render server is unavailable; try again later".into(),
+            )
+        }
+        e => {
+            tracing::error!("export render failed for page {id}: {e}");
+            ApiError::Internal("export failed".to_string())
+        }
     })?;
 
     let slug = export::sanitize_filename(
@@ -76,7 +85,7 @@ async fn export_page(
                 format!("attachment; filename=\"{filename}\""),
             ),
         ],
-        artifact.primary.to_vec(),
+        artifact.bytes.to_vec(),
     )
         .into_response())
 }
